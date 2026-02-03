@@ -1,0 +1,58 @@
+# ====================
+# Build directories
+# ====================
+build/
+cmake-build-*/
+
+# ====================
+# CLion
+# ====================
+.idea/
+
+# ====================
+# Visual Studio
+# ====================
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# ====================
+# VS Code
+# ====================
+.vscode/
+
+# ====================
+# .NET
+# ====================
+bin/
+obj/
+
+# ====================
+# Tool-specific
+# ====================
+.zencoder/
+.zenflow/
+
+# ====================
+# OS files
+# ====================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ====================
+# Compiled outputs
+# ====================
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.o
+*.a

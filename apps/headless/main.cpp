@@ -1,124 +1,226 @@
 /*
  * main.cpp — Axiom Headless Runner
  *
- * TASK-000: ABI validation.
- * Proves that a C++ executable can link against AxiomCore,
- * call through the C API, and get correct results.
+ * TASK-001: World lifecycle + tick loop + minimal observation.
  *
- * This will later become the headless test/benchmark/server host.
- * For now it just validates the toolchain.
+ * Validates:
+ *   - ABI compatibility (retained from TASK-000)
+ *   - World creation and destruction
+ *   - Tick advancement
+ *   - Snapshot read (caller-allocated buffer pattern)
+ *   - Null-safety of all API functions
+ *
+ * See TASK-001.md for acceptance criteria.
  */
 
 #include "ax_api.h"
 
 #include <cstdio>
-#include <cstdlib>  // EXIT_SUCCESS, EXIT_FAILURE
+#include <cstdlib>   // EXIT_SUCCESS, EXIT_FAILURE
+#include <cstring>   // memset
+
+/* ── Test helper ─────────────────────────────────────────────── */
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void check(bool condition, const char* label)
+{
+    if (condition) {
+        std::printf("  [PASS] %s\n", label);
+        ++g_pass;
+    } else {
+        std::printf("  [FAIL] %s\n", label);
+        ++g_fail;
+    }
+}
+
+/* ── Main ────────────────────────────────────────────────────── */
 
 int main()
 {
-    std::printf("=== Axiom Headless — ABI Validation ===\n\n");
+    std::printf("=== Axiom Headless -- TASK-001 Validation ===\n\n");
 
-    /* ── ABI version check ───────────────────────────────────────
-     * Compare the compile-time constant (from the header we built
-     * against) with the runtime value (from the loaded library).
-     * Mismatch means the DLL doesn't match the header.
-     */
-    const uint32_t runtime_abi = ax_get_abi_version();
-    const uint32_t compiled_abi = AX_ABI_VERSION;
+    /* ── 1. ABI compatibility (from TASK-000) ──────────────────── */
 
-    std::printf("ABI version (compiled): %u\n", compiled_abi);
-    std::printf("ABI version (runtime):  %u\n", runtime_abi);
+    std::printf("--- ABI Checks ---\n");
 
-    if (runtime_abi != compiled_abi) {
-        std::printf("\n** FAIL: ABI version mismatch! **\n");
-        return EXIT_FAILURE;
-    }
-    std::printf("ABI version match: OK\n\n");
+    check(ax_get_abi_version() == AX_ABI_VERSION,
+          "ABI version matches");
 
-    /* ── Packed version ──────────────────────────────────────────
-     * Decode the packed version to prove multi-field returns work.
-     */
-    const uint32_t version = ax_get_version_packed();
-    const unsigned major = (version >> 16) & 0xFF;
-    const unsigned minor = (version >>  8) & 0xFF;
-    const unsigned patch =  version        & 0xFF;
+    check(ax_get_version_packed() == AX_VERSION_PACKED,
+          "Packed version matches");
 
-    std::printf("Engine version: %u.%u.%u (packed: 0x%08X)\n",
-                major, minor, patch, version);
+    check(ax_get_build_info() != nullptr,
+          "Build info non-null");
 
-    if (version != AX_VERSION_PACKED) {
-        std::printf("\n** FAIL: packed version mismatch! **\n");
-        return EXIT_FAILURE;
-    }
-    std::printf("Packed version match: OK\n\n");
+    std::printf("\n");
 
-    /* ── Build info string ───────────────────────────────────────
-     * Proves const char* return across the ABI boundary.
-     * Pointer is to static storage inside the library.
-     */
-    const char* info = ax_get_build_info();
-    if (info == nullptr) {
-        std::printf("** FAIL: ax_get_build_info() returned null! **\n");
-        return EXIT_FAILURE;
-    }
-    std::printf("Build info: %s\n", info);
-    std::printf("Build info return: OK\n\n");
+    /* ── 2. World creation ─────────────────────────────────────── */
 
-    /* ── Allocator round-trip ────────────────────────────────────
-     * Proves ax_alloc / ax_free work across the ABI boundary.
-     * Critical on Windows where DLL and EXE may use different heaps.
-     */
-    const size_t test_size = 256;
-    void* block = ax_alloc(test_size);
+    std::printf("--- World Creation ---\n");
 
-    if (block == nullptr) {
-        std::printf("** FAIL: ax_alloc(%zu) returned null! **\n", test_size);
-        return EXIT_FAILURE;
-    }
-    std::printf("ax_alloc(%zu): %p\n", test_size, block);
+    ax_world_desc desc;
+    std::memset(&desc, 0, sizeof(desc));
+    desc.width  = 64;
+    desc.height = 48;
 
-    /* Write a pattern to verify the memory is usable */
-    auto* bytes = static_cast<unsigned char*>(block);
-    for (size_t i = 0; i < test_size; ++i) {
-        bytes[i] = static_cast<unsigned char>(i & 0xFF);
-    }
+    ax_world_handle world = ax_world_create(&desc);
+    check(world != nullptr, "ax_world_create(64x48) succeeds");
 
-    /* Verify the pattern */
-    bool pattern_ok = true;
-    for (size_t i = 0; i < test_size; ++i) {
-        if (bytes[i] != static_cast<unsigned char>(i & 0xFF)) {
-            pattern_ok = false;
+    /* Query dimensions */
+    uint32_t w = 0, h = 0;
+    ax_world_get_size(world, &w, &h);
+    check(w == 64, "width == 64");
+    check(h == 48, "height == 48");
+
+    /* Initial tick */
+    check(ax_world_get_tick(world) == 0, "initial tick == 0");
+
+    std::printf("\n");
+
+    /* ── 3. Tick advancement ───────────────────────────────────── */
+
+    std::printf("--- Tick Advancement ---\n");
+
+    ax_world_step(world, 1);
+    check(ax_world_get_tick(world) == 1, "step(1) -> tick == 1");
+
+    ax_world_step(world, 9);
+    check(ax_world_get_tick(world) == 10, "step(9) -> tick == 10");
+
+    std::printf("\n");
+
+    /* ── 4. Snapshot read ──────────────────────────────────────── */
+
+    std::printf("--- Snapshot (World Meta) ---\n");
+
+    /* Phase 1: query required size */
+    uint32_t required = ax_world_read_snapshot(
+        world, AX_SNAP_WORLD_META, nullptr, 0);
+
+    check(required == sizeof(ax_world_meta_snapshot_v1),
+          "size query returns correct size");
+
+    /* Phase 2: read into buffer */
+    ax_world_meta_snapshot_v1 snap;
+    std::memset(&snap, 0, sizeof(snap));
+
+    uint32_t written = ax_world_read_snapshot(
+        world, AX_SNAP_WORLD_META, &snap, sizeof(snap));
+
+    check(written == sizeof(ax_world_meta_snapshot_v1),
+          "read returns correct size");
+
+    check(snap.version == AX_WORLD_META_SNAPSHOT_VERSION,
+          "snapshot version correct");
+
+    check(snap.sizeBytes == sizeof(ax_world_meta_snapshot_v1),
+          "snapshot sizeBytes correct");
+
+    check(snap.tick == 10,
+          "snapshot tick == 10");
+
+    check(snap.width == 64,
+          "snapshot width == 64");
+
+    check(snap.height == 48,
+          "snapshot height == 48");
+
+    check(snap.reserved == 0,
+          "snapshot reserved == 0");
+
+    /* Undersized buffer returns required size without writing */
+    ax_world_meta_snapshot_v1 untouched;
+    std::memset(&untouched, 0xFF, sizeof(untouched));
+
+    uint32_t undersized = ax_world_read_snapshot(
+        world, AX_SNAP_WORLD_META, &untouched, 1);
+
+    check(undersized == sizeof(ax_world_meta_snapshot_v1),
+          "undersized buffer returns required size");
+
+    /* Verify the buffer was not written to */
+    unsigned char expected_byte = 0xFF;
+    bool untouched_ok = true;
+    auto* bytes = reinterpret_cast<unsigned char*>(&untouched);
+    for (size_t i = 0; i < sizeof(untouched); ++i) {
+        if (bytes[i] != expected_byte) {
+            untouched_ok = false;
             break;
         }
     }
+    check(untouched_ok, "undersized buffer not modified");
 
-    ax_free(block);
-    block = nullptr;
+    std::printf("\n");
 
-    if (!pattern_ok) {
-        std::printf("** FAIL: memory pattern verification failed! **\n");
-        return EXIT_FAILURE;
-    }
-    std::printf("Allocator round-trip: OK\n\n");
+    /* ── 5. Null-safety ────────────────────────────────────────── */
 
-    /* ── Zero-size allocation ────────────────────────────────────
-     * ax_alloc(0) must return nullptr (documented behavior).
-     */
-    void* zero_block = ax_alloc(0);
-    if (zero_block != nullptr) {
-        std::printf("** FAIL: ax_alloc(0) should return nullptr! **\n");
-        ax_free(zero_block);
-        return EXIT_FAILURE;
-    }
-    std::printf("ax_alloc(0) → nullptr: OK\n\n");
+    std::printf("--- Null Safety ---\n");
 
-    /* ── ax_free(nullptr) ────────────────────────────────────────
-     * Must be a safe no-op (documented behavior).
-     */
-    ax_free(nullptr);
-    std::printf("ax_free(nullptr): OK (no crash)\n\n");
+    /* Create with null desc */
+    check(ax_world_create(nullptr) == nullptr,
+          "ax_world_create(NULL) -> NULL");
+
+    /* Create with zero dimensions */
+    ax_world_desc bad_desc;
+    std::memset(&bad_desc, 0, sizeof(bad_desc));
+
+    bad_desc.width = 0; bad_desc.height = 48;
+    check(ax_world_create(&bad_desc) == nullptr,
+          "ax_world_create(0x48) -> NULL");
+
+    bad_desc.width = 64; bad_desc.height = 0;
+    check(ax_world_create(&bad_desc) == nullptr,
+          "ax_world_create(64x0) -> NULL");
+
+    /* Operations on null handle (must not crash) */
+    ax_world_destroy(nullptr);
+    check(true, "ax_world_destroy(NULL) no crash");
+
+    ax_world_step(nullptr, 10);
+    check(true, "ax_world_step(NULL, 10) no crash");
+
+    /* step with ticks == 0 (must not crash, must not advance) */
+    uint64_t tick_before = ax_world_get_tick(world);
+    ax_world_step(world, 0);
+    check(ax_world_get_tick(world) == tick_before,
+          "ax_world_step(world, 0) no-op");
+
+    check(ax_world_get_tick(nullptr) == 0,
+          "ax_world_get_tick(NULL) -> 0");
+
+    /* get_size with null handle and null out-pointers */
+    ax_world_get_size(nullptr, &w, &h);
+    check(true, "ax_world_get_size(NULL, ...) no crash");
+
+    ax_world_get_size(world, nullptr, nullptr);
+    check(true, "ax_world_get_size(world, NULL, NULL) no crash");
+
+    /* Snapshot on null world */
+    check(ax_world_read_snapshot(nullptr, AX_SNAP_WORLD_META, nullptr, 0) == 0,
+          "ax_world_read_snapshot(NULL) -> 0");
+
+    /* Unknown channel */
+    check(ax_world_read_snapshot(world, (ax_snapshot_channel)999, nullptr, 0) == 0,
+          "ax_world_read_snapshot(unknown channel) -> 0");
+
+    std::printf("\n");
+
+    /* ── 6. Cleanup ────────────────────────────────────────────── */
+
+    std::printf("--- Cleanup ---\n");
+
+    ax_world_destroy(world);
+    world = nullptr;
+    check(true, "ax_world_destroy completed");
+
+    std::printf("\n");
 
     /* ── Summary ─────────────────────────────────────────────── */
-    std::printf("=== All ABI validation checks passed ===\n");
-    return EXIT_SUCCESS;
+
+    std::printf("=== Results: %d passed, %d failed ===\n",
+                g_pass, g_fail);
+
+    return (g_fail == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -8,19 +8,19 @@
 #   - apps/viewer   (C#, loads via P/Invoke)
 
 # ── Sources ──────────────────────────────────────────────────────
-# For TASK-000: only the C API binding layer.
-# Core simulation sources (engine/src/) will be added as they exist.
 
 add_library(AxiomCore SHARED
+        core/world.cpp
         bindings/c/src/ax_api.cpp
 )
 
 # ── Include paths ────────────────────────────────────────────────
 # PUBLIC:  consumers linking against AxiomCore get ax_api.h
-# PRIVATE: internal engine headers (future)
+# PRIVATE: internal engine headers (core simulation, future subsystems)
 
 target_include_directories(AxiomCore
         PUBLIC  bindings/c/include
+        PRIVATE core
         PRIVATE src
 )
 

@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AxiomViewer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3fc541987563ea75c0defb4921e1ddc128760603")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+43d5ab1e13db20138166e404da9a52b8a189071e")]
 [assembly: System.Reflection.AssemblyProductAttribute("AxiomViewer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AxiomViewer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

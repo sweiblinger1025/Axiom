@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      Axiom Viewer — C# frontend for the Axiom simulation engine.
+      
+      TASK-000: Console-mode ABI validation.
+      Later milestones will add rendering, UI, and platform-specific features.
+    -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Axiom</RootNamespace>
+    <AssemblyName>AxiomViewer</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!--
+    Native library (AxiomCore) loading:
+    
+    P/Invoke searches for the native library in the application's output
+    directory at runtime. For TASK-000, manually copy the built library:
+    
+    Windows:  Copy AxiomCore.dll from cmake-build-debug/bin/ (or build/bin/)
+              into this project's bin/Debug/net10.0/ output directory.
+    
+    Linux:    Copy libAxiomCore.so similarly. You may also need to set
+              LD_LIBRARY_PATH or place it next to the executable.
+    
+    A post-build copy step can be added here later to automate this:
+    
+    <Target Name="CopyNativeLib" AfterTargets="Build">
+      <Copy SourceFiles="path/to/AxiomCore.dll"
+            DestinationFolder="$(OutputPath)"
+            SkipUnchangedFiles="true" />
+    </Target>
+  -->
+
+</Project>

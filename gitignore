@@ -1,50 +1,41 @@
-# ====================
-# Build directories
-# ====================
+# ── C++ / CMake build outputs ────────────────────────────────────
 build/
 cmake-build-*/
+out/
+CMakeUserPresets.json
 
-# ====================
-# CLion
-# ====================
+# ── .NET build outputs ───────────────────────────────────────────
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.nupkg
+*.snupkg
+
+# ── IDE: JetBrains (CLion, Rider) ────────────────────────────────
 .idea/
 
-# ====================
-# Visual Studio
-# ====================
+# ── IDE: Visual Studio ───────────────────────────────────────────
 .vs/
-*.suo
-*.user
-*.userosscache
+*.vcxproj.user
+*.rsuser
 *.sln.docstates
 
-# ====================
-# VS Code
-# ====================
+# ── IDE: VS Code ─────────────────────────────────────────────────
 .vscode/
 
-# ====================
-# .NET
-# ====================
-bin/
-obj/
-
-# ====================
-# Tool-specific
-# ====================
+# ── AI / Tooling ─────────────────────────────────────────────────
 .zencoder/
 .zenflow/
 
-# ====================
-# OS files
-# ====================
-.DS_Store
+# ── OS artifacts ─────────────────────────────────────────────────
 Thumbs.db
+ehthumbs.db
 Desktop.ini
+.DS_Store
+._*
 
-# ====================
-# Compiled outputs
-# ====================
+# ── Compiled binaries ────────────────────────────────────────────
 *.dll
 *.so
 *.dylib
@@ -53,6 +44,6 @@ Desktop.ini
 *.ilk
 *.exp
 *.lib
-*.obj
-*.o
 *.a
+*.o
+*.obj

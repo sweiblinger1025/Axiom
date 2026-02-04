@@ -36,4 +36,15 @@
     </Target>
   -->
 
+	<ItemGroup>
+		<NativeAxiomCore Include="G:\Axiom\cmake-build-debug\bin\AxiomCore.dll" />
+	</ItemGroup>
+
+	<Target Name="CopyNativeAxiomCore" AfterTargets="Build">
+		<Copy SourceFiles="@(NativeAxiomCore)"
+			  DestinationFolder="$(OutDir)"
+			  SkipUnchangedFiles="true"
+			  Condition="Exists('%(NativeAxiomCore.FullPath)')" />
+	</Target>
+	
 </Project>

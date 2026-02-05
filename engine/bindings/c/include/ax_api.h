@@ -296,8 +296,181 @@ AX_API uint32_t AX_CALL ax_world_read_snapshot(
     void* outBuffer,
     uint32_t outBufferSizeBytes);
 
+  /* ── Commands ────────────────────────────────────────────────── */
+
+/*
+ * Command types identify what action a command requests.
+ * Debug commands start at 1000 to separate them from future
+ * gameplay commands.
+ *
+ * Stored as uint32_t in command structs for ABI stability.
+ *
+ * C#: enum (uint)
+ */
+typedef enum ax_command_type
+{
+    AX_CMD_NONE = 0,
+
+    /* Debug-only commands (v0) */
+    AX_CMD_DEBUG_SET_CELL_U8 = 1000
+} ax_command_type;
+
+/*
+ * Reject reasons for commands that fail state-dependent validation
+ * at tick processing time.
+ *
+ * These are NOT used for structural submission failures (null handle,
+ * bad version, unknown type) — those cause submission to return 0
+ * with no result record produced.
+ *
+ * Stored as uint8_t for ABI size control. C does not support
+ * enum : uint8_t, so we use a typedef with named constants.
+ *
+ * C#: byte
+ */
+typedef uint8_t ax_command_reject_reason;
+
+#define AX_CMD_REJECT_NONE            ((ax_command_reject_reason)0)
+#define AX_CMD_REJECT_INVALID_COORDS  ((ax_command_reject_reason)1)
+#define AX_CMD_REJECT_INVALID_CHANNEL ((ax_command_reject_reason)2)
+
+/*
+ * Payload for AX_CMD_DEBUG_SET_CELL_U8.
+ * Sets a single cell's uint8 value in a specified channel.
+ *
+ * channel: AX_SNAP_TERRAIN or AX_SNAP_OCCUPANCY
+ * value:   any uint8_t (no semantic restrictions in v0)
+ *
+ * C#: [StructLayout(LayoutKind.Sequential)]
+ *     uint x, uint y, byte channel, byte value, ushort _pad
+ */
+typedef struct ax_cmd_set_cell_u8_v1
+{
+    uint32_t x;
+    uint32_t y;
+    uint8_t  channel;   /* AX_SNAP_TERRAIN or AX_SNAP_OCCUPANCY */
+    uint8_t  value;
+    uint16_t _pad;      /* explicit padding for alignment */
+} ax_cmd_set_cell_u8_v1;
+
+/*
+ * Command descriptor (v1).
+ *
+ * All commands use this single struct with a type discriminator
+ * and a fixed-size payload union. Payload interpretation is
+ * determined by type + version.
+ *
+ * The 32-byte payload union is a v0 size cap.
+ *
+ * C#: [StructLayout(LayoutKind.Sequential)]
+ *     uint version, uint type, then payload as fixed-size byte array
+ */
+#define AX_COMMAND_VERSION 1u
+
+typedef struct ax_command_v1
+{
+    uint32_t version;   /* must be AX_COMMAND_VERSION (1) */
+    uint32_t type;      /* ax_command_type, stored as uint32_t for ABI */
+
+    union
+    {
+        ax_cmd_set_cell_u8_v1 setCellU8;
+        uint8_t               _raw[32]; /* v0 max payload space */
+    } payload;
+} ax_command_v1;
+
+/*
+ * Command result (v1).
+ *
+ * Every command processed at tick boundary produces exactly
+ * one result record. Results are idempotent reads — they
+ * persist until the next step() clears them.
+ *
+ * Fields are ordered to avoid hidden compiler padding.
+ *
+ * See COMMAND_MODEL.md: "Each processed command produces
+ * exactly one result."
+ *
+ * C#: [StructLayout(LayoutKind.Sequential)]
+ *     uint sizeBytes, uint version, ulong commandId,
+ *     ulong tickApplied, uint type, byte accepted,
+ *     byte reason, ushort _pad
+ */
+#define AX_COMMAND_RESULT_VERSION 1u
+
+typedef struct ax_command_result_v1
+{
+    uint32_t sizeBytes;     /* sizeof(ax_command_result_v1)      */
+    uint32_t version;       /* AX_COMMAND_RESULT_VERSION (1)     */
+
+    uint64_t commandId;     /* engine-assigned, monotonic        */
+    uint64_t tickApplied;   /* tick when processed               */
+
+    uint32_t type;          /* ax_command_type                   */
+    uint8_t  accepted;      /* 1 = applied, 0 = rejected        */
+    uint8_t  reason;        /* ax_command_reject_reason          */
+    uint16_t _pad;          /* explicit alignment                */
+} ax_command_result_v1;
+
+/* ── Commands: Submission ────────────────────────────────────── */
+
+/*
+ * Submit a command to be processed at the next tick boundary.
+ *
+ * Performs structural validation only:
+ *   - world and cmd must be non-null
+ *   - cmd->version must be AX_COMMAND_VERSION
+ *   - cmd->type must be a known command type
+ *
+ * State-dependent validation (bounds, channel) is deferred
+ * to tick processing per COMMAND_MODEL.md.
+ *
+ * Returns:
+ *   - non-zero engine-assigned command ID on success
+ *   - 0 on structural failure (command not queued, no result)
+ *
+ * C#: [DllImport] IntPtr, ref ax_command_v1 → ulong
+ */
+AX_API uint64_t AX_CALL ax_world_submit_command(
+    ax_world_handle world,
+    const ax_command_v1* cmd);
+
+/* ── Commands: Results ───────────────────────────────────────── */
+
+/*
+ * Read command results from the most recent tick.
+ *
+ * Results are produced during step() for every processed command.
+ * Results persist until the next step() call clears them.
+ * Reads are idempotent within a tick.
+ *
+ * Buffer contract (matches snapshot semantics):
+ *   - outBuffer == NULL → returns required size in bytes
+ *   - outBufferSizeBytes < required → returns required size
+ *   - outBufferSizeBytes >= required → writes results, returns bytes written
+ *   - Returns 0 on error (null world)
+ *
+ * C#: [DllImport] IntPtr, IntPtr, uint → uint
+ */
+AX_API uint32_t AX_CALL ax_world_read_command_results(
+    ax_world_handle world,
+    void* outBuffer,
+    uint32_t outBufferSizeBytes);
+
 #ifdef __cplusplus
 }
+
+/* ── Static Layout Guarantees ────────────────────────────────── */
+/* These fire at compile time if struct layouts drift. */
+
+static_assert(sizeof(ax_cmd_set_cell_u8_v1) == 12,
+              "ax_cmd_set_cell_u8_v1 size mismatch");
+static_assert(sizeof(ax_command_v1) == 40,
+              "ax_command_v1 size mismatch");
+static_assert(sizeof(ax_command_result_v1) == 32,
+              "ax_command_result_v1 size mismatch");
+
 #endif
 
 #endif /* AX_API_H */
+

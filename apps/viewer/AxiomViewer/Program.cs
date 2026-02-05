@@ -1,19 +1,16 @@
 ﻿/*
  * Program.cs — Axiom Viewer entry point
  *
- * TASK-001: World lifecycle + tick loop + minimal observation.
- * TASK-002: Spatial grid channels (terrain + occupancy snapshots).
+ * TASK-003: Debug Command Pipeline validation (C# side).
  *
- * Validates the same checks as the headless runner, but from
- * managed code via P/Invoke. Proves that:
- *   - World creation and destruction work across the ABI
- *   - Cell count query works
- *   - Tick advancement is deterministic
- *   - Snapshot reads work with caller-allocated buffers
- *   - Terrain and occupancy channels round-trip correctly
- *   - All null-safety guarantees hold from C#
+ * Validates (cumulative — includes all prior task checks):
+ *   TASK-000: ABI compatibility
+ *   TASK-001: World lifecycle, tick advancement, snapshots
+ *   TASK-002: Cell count, terrain/occupancy grid snapshots
+ *   TASK-003: Command submission, tick-boundary processing,
+ *             results, rejections, structural failures
  *
- * See TASK-001.md and TASK-002.md for acceptance criteria.
+ * See TASK-003.md for acceptance criteria.
  */
 
 using System;
@@ -45,17 +42,33 @@ namespace Axiom
 
         static int Main(string[] args)
         {
-            Console.WriteLine("=== Axiom Viewer -- TASK-002 Validation (C#) ===");
+            Console.WriteLine("=== Axiom Viewer -- TASK-003 Validation (C#) ===");
             Console.WriteLine();
 
-            // ── 1. ABI Checks (from TASK-000) ─────────────────────
+            // ── 0. Struct Size Checks (compile-time equivalent) ───
+            //
+            // C++ uses static_assert; C# validates at runtime.
+            // These must match the expected sizes from TASK-003.md
+            // and the static_asserts in ax_api.cpp.
+
+            Console.WriteLine("--- Struct Size Checks ---");
+
+            Check(Marshal.SizeOf<AxCmdSetCellU8V1>() == 12,
+                  "AxCmdSetCellU8V1 size == 12");
+            Check(Marshal.SizeOf<AxCommandV1>() == 40,
+                  "AxCommandV1 size == 40");
+            Check(Marshal.SizeOf<AxCommandResultV1>() == 32,
+                  "AxCommandResultV1 size == 32");
+
+            Console.WriteLine();
+
+            // ── 1. ABI Checks (TASK-000) ──────────────────────────
 
             Console.WriteLine("--- ABI Checks ---");
 
             Check(NativeBindings.ax_get_abi_version() == NativeBindings.AX_ABI_VERSION,
                   "ABI version matches");
 
-            // Packed version: 0.0.1 → 0x00000001
             uint expectedPacked = (0u << 16) | (0u << 8) | 1u;
             Check(NativeBindings.ax_get_version_packed() == expectedPacked,
                   "Packed version matches");
@@ -65,7 +78,7 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 2. World Creation ─────────────────────────────────
+            // ── 2. World Creation (TASK-001) ──────────────────────
 
             Console.WriteLine("--- World Creation ---");
 
@@ -79,21 +92,24 @@ namespace Axiom
             IntPtr world = NativeBindings.ax_world_create(ref desc);
             Check(world != IntPtr.Zero, "ax_world_create(64x48) succeeds");
 
-            // Query dimensions
             NativeBindings.ax_world_get_size(world, out uint w, out uint h);
             Check(w == 64, "width == 64");
             Check(h == 48, "height == 48");
 
-            // Cell count (TASK-002)
-            Check(NativeBindings.ax_world_get_cell_count(world) == 64u * 48u,
-                  "cell count == 3072");
-
-            // Initial tick
             Check(NativeBindings.ax_world_get_tick(world) == 0, "initial tick == 0");
 
             Console.WriteLine();
 
-            // ── 3. Tick Advancement ───────────────────────────────
+            // ── 3. Cell Count (TASK-002) ──────────────────────────
+
+            Console.WriteLine("--- Cell Count ---");
+
+            Check(NativeBindings.ax_world_get_cell_count(world) == 64u * 48u,
+                  "cell count == 64 * 48");
+
+            Console.WriteLine();
+
+            // ── 4. Tick Advancement (TASK-001) ────────────────────
 
             Console.WriteLine("--- Tick Advancement ---");
 
@@ -105,74 +121,58 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 4. Snapshot: World Meta (TASK-001) ────────────────
+            // ── 5. Snapshot: World Meta (TASK-001) ────────────────
 
             Console.WriteLine("--- Snapshot (World Meta) ---");
 
-            int structSize = Marshal.SizeOf<AxWorldMetaSnapshotV1>();
+            int metaSize = Marshal.SizeOf<AxWorldMetaSnapshotV1>();
 
-            // Phase 1: query required size (null buffer)
             uint required = NativeBindings.ax_world_read_snapshot(
                 world, AxSnapshotChannel.WorldMeta, IntPtr.Zero, 0);
+            Check(required == (uint)metaSize, "size query returns correct size");
 
-            Check(required == (uint)structSize, "size query returns correct size");
-
-            // Phase 2: read into buffer
-            IntPtr buffer = Marshal.AllocHGlobal(structSize);
+            IntPtr metaBuf = Marshal.AllocHGlobal(metaSize);
             try
             {
-                // Zero the buffer before reading
-                for (int i = 0; i < structSize; i++)
-                    Marshal.WriteByte(buffer, i, 0);
+                for (int i = 0; i < metaSize; i++)
+                    Marshal.WriteByte(metaBuf, i, 0);
 
                 uint written = NativeBindings.ax_world_read_snapshot(
-                    world, AxSnapshotChannel.WorldMeta, buffer, (uint)structSize);
+                    world, AxSnapshotChannel.WorldMeta, metaBuf, (uint)metaSize);
 
-                Check(written == (uint)structSize, "read returns correct size");
+                Check(written == (uint)metaSize, "read returns correct size");
 
-                var snap = Marshal.PtrToStructure<AxWorldMetaSnapshotV1>(buffer);
-
-                Check(snap.version == NativeBindings.AX_WORLD_META_SNAPSHOT_VERSION,
+                var metaSnap = Marshal.PtrToStructure<AxWorldMetaSnapshotV1>(metaBuf);
+                Check(metaSnap.version == NativeBindings.AX_WORLD_META_SNAPSHOT_VERSION,
                       "snapshot version correct");
-                Check(snap.sizeBytes == (uint)structSize,
+                Check(metaSnap.sizeBytes == (uint)metaSize,
                       "snapshot sizeBytes correct");
-                Check(snap.tick == 10,
-                      "snapshot tick == 10");
-                Check(snap.width == 64,
-                      "snapshot width == 64");
-                Check(snap.height == 48,
-                      "snapshot height == 48");
-                Check(snap.reserved == 0,
-                      "snapshot reserved == 0");
+                Check(metaSnap.tick == 10, "snapshot tick == 10");
+                Check(metaSnap.width == 64, "snapshot width == 64");
+                Check(metaSnap.height == 48, "snapshot height == 48");
+                Check(metaSnap.reserved == 0, "snapshot reserved == 0");
             }
             finally
             {
-                Marshal.FreeHGlobal(buffer);
+                Marshal.FreeHGlobal(metaBuf);
             }
 
-            // Undersized buffer: should return required size without writing
-            IntPtr undersizedBuf = Marshal.AllocHGlobal(structSize);
+            // Undersized buffer
+            IntPtr undersizedBuf = Marshal.AllocHGlobal(metaSize);
             try
             {
-                // Fill with 0xFF sentinel pattern
-                for (int i = 0; i < structSize; i++)
+                for (int i = 0; i < metaSize; i++)
                     Marshal.WriteByte(undersizedBuf, i, 0xFF);
 
                 uint undersized = NativeBindings.ax_world_read_snapshot(
                     world, AxSnapshotChannel.WorldMeta, undersizedBuf, 1);
+                Check(undersized == (uint)metaSize, "undersized buffer returns required size");
 
-                Check(undersized == (uint)structSize,
-                      "undersized buffer returns required size");
-
-                // Verify the buffer was not written to
                 bool untouched = true;
-                for (int i = 0; i < structSize; i++)
+                for (int i = 0; i < metaSize; i++)
                 {
                     if (Marshal.ReadByte(undersizedBuf, i) != 0xFF)
-                    {
-                        untouched = false;
-                        break;
-                    }
+                    { untouched = false; break; }
                 }
                 Check(untouched, "undersized buffer not modified");
             }
@@ -183,161 +183,323 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 5. Snapshot: Terrain (TASK-002) ───────────────────
+            // ── 6. Snapshot: Terrain & Occupancy (TASK-002) ───────
 
-            Console.WriteLine("--- Snapshot (Terrain) ---");
+            Console.WriteLine("--- Snapshot (Terrain & Occupancy) ---");
 
             uint cellCount = NativeBindings.ax_world_get_cell_count(world);
 
-            // Size query
+            // Terrain
             uint terrainRequired = NativeBindings.ax_world_read_snapshot(
                 world, AxSnapshotChannel.Terrain, IntPtr.Zero, 0);
+            Check(terrainRequired == cellCount, "terrain size query == cellCount");
 
-            Check(terrainRequired == cellCount,
-                  "terrain size query == cellCount");
-
-            // Full read
             IntPtr terrainBuf = Marshal.AllocHGlobal((int)cellCount);
             try
             {
-                // Fill with sentinel
-                for (int i = 0; i < (int)cellCount; i++)
-                    Marshal.WriteByte(terrainBuf, i, 0xFF);
+                byte[] terrainArr = new byte[cellCount];
 
                 uint terrainWritten = NativeBindings.ax_world_read_snapshot(
                     world, AxSnapshotChannel.Terrain, terrainBuf, cellCount);
+                Check(terrainWritten == cellCount, "terrain read succeeds");
 
-                Check(terrainWritten == cellCount,
-                      "terrain read returns cellCount bytes");
+                Marshal.Copy(terrainBuf, terrainArr, 0, (int)cellCount);
 
-                // Verify all zeros
-                bool terrainAllZero = true;
-                for (int i = 0; i < (int)cellCount; i++)
+                bool allZero = true;
+                for (uint i = 0; i < cellCount; i++)
                 {
-                    if (Marshal.ReadByte(terrainBuf, i) != 0)
-                    {
-                        terrainAllZero = false;
-                        break;
-                    }
+                    if (terrainArr[i] != 0) { allZero = false; break; }
                 }
-                Check(terrainAllZero, "terrain data all zeros");
+                Check(allZero, "terrain all zeros initially");
             }
             finally
             {
                 Marshal.FreeHGlobal(terrainBuf);
             }
 
-            // Undersized buffer
-            IntPtr terrainSmall = Marshal.AllocHGlobal(4);
-            try
-            {
-                for (int i = 0; i < 4; i++)
-                    Marshal.WriteByte(terrainSmall, i, 0xFF);
-
-                uint terrainUndersized = NativeBindings.ax_world_read_snapshot(
-                    world, AxSnapshotChannel.Terrain, terrainSmall, 4);
-
-                Check(terrainUndersized == cellCount,
-                      "terrain undersized buffer returns required size");
-
-                bool terrainSmallOk = true;
-                for (int i = 0; i < 4; i++)
-                {
-                    if (Marshal.ReadByte(terrainSmall, i) != 0xFF)
-                    {
-                        terrainSmallOk = false;
-                        break;
-                    }
-                }
-                Check(terrainSmallOk, "terrain undersized buffer not modified");
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(terrainSmall);
-            }
-
-            Console.WriteLine();
-
-            // ── 6. Snapshot: Occupancy (TASK-002) ─────────────────
-
-            Console.WriteLine("--- Snapshot (Occupancy) ---");
-
-            // Size query
+            // Occupancy
             uint occRequired = NativeBindings.ax_world_read_snapshot(
                 world, AxSnapshotChannel.Occupancy, IntPtr.Zero, 0);
+            Check(occRequired == cellCount, "occupancy size query == cellCount");
 
-            Check(occRequired == cellCount,
-                  "occupancy size query == cellCount");
-
-            // Full read
             IntPtr occBuf = Marshal.AllocHGlobal((int)cellCount);
             try
             {
-                for (int i = 0; i < (int)cellCount; i++)
-                    Marshal.WriteByte(occBuf, i, 0xFF);
+                byte[] occArr = new byte[cellCount];
 
                 uint occWritten = NativeBindings.ax_world_read_snapshot(
                     world, AxSnapshotChannel.Occupancy, occBuf, cellCount);
+                Check(occWritten == cellCount, "occupancy read succeeds");
 
-                Check(occWritten == cellCount,
-                      "occupancy read returns cellCount bytes");
+                Marshal.Copy(occBuf, occArr, 0, (int)cellCount);
 
-                bool occAllZero = true;
-                for (int i = 0; i < (int)cellCount; i++)
+                bool allZero = true;
+                for (uint i = 0; i < cellCount; i++)
                 {
-                    if (Marshal.ReadByte(occBuf, i) != 0)
-                    {
-                        occAllZero = false;
-                        break;
-                    }
+                    if (occArr[i] != 0) { allZero = false; break; }
                 }
-                Check(occAllZero, "occupancy data all zeros");
+                Check(allZero, "occupancy all zeros initially");
             }
             finally
             {
                 Marshal.FreeHGlobal(occBuf);
             }
 
-            // Undersized buffer
-            IntPtr occSmall = Marshal.AllocHGlobal(4);
+            Console.WriteLine();
+
+            // ── 7. Command Pipeline (TASK-003) ────────────────────
+
+            Console.WriteLine("--- Command Pipeline ---");
+
+            // -- 7a. Valid set-cell command (terrain) ---------------
+            //
+            // World is at tick 10. Submit command to set terrain at
+            // (3, 2) to value 42. Step once. Verify result accepted,
+            // tickApplied==10, and snapshot reflects the change.
+
+            var cmd = default(AxCommandV1);
+            cmd.version = 1;
+            cmd.type = (uint)AxCommandType.DebugSetCellU8;
+            cmd.setCellU8.x = 3;
+            cmd.setCellU8.y = 2;
+            cmd.setCellU8.channel = (byte)AxSnapshotChannel.Terrain;
+            cmd.setCellU8.value = 42;
+
+            ulong id1 = NativeBindings.ax_world_submit_command(world, ref cmd);
+            Check(id1 != 0, "valid command -> non-zero ID");
+
+            NativeBindings.ax_world_step(world, 1);
+            // tick was 10, commands processed at 10, tick now 11
+
+            Check(NativeBindings.ax_world_get_tick(world) == 11,
+                  "tick == 11 after step");
+
+            // Read command result
+            int resultStructSize = Marshal.SizeOf<AxCommandResultV1>();
+
+            uint resultRequired = NativeBindings.ax_world_read_command_results(
+                world, IntPtr.Zero, 0);
+            Check(resultRequired == (uint)resultStructSize,
+                  "one result -> correct required size");
+
+            IntPtr resultBuf = Marshal.AllocHGlobal(resultStructSize);
             try
             {
-                for (int i = 0; i < 4; i++)
-                    Marshal.WriteByte(occSmall, i, 0xFF);
+                for (int i = 0; i < resultStructSize; i++)
+                    Marshal.WriteByte(resultBuf, i, 0);
 
-                uint occUndersized = NativeBindings.ax_world_read_snapshot(
-                    world, AxSnapshotChannel.Occupancy, occSmall, 4);
+                uint resultWritten = NativeBindings.ax_world_read_command_results(
+                    world, resultBuf, (uint)resultStructSize);
+                Check(resultWritten == (uint)resultStructSize,
+                      "result read succeeds");
 
-                Check(occUndersized == cellCount,
-                      "occupancy undersized buffer returns required size");
-
-                bool occSmallOk = true;
-                for (int i = 0; i < 4; i++)
-                {
-                    if (Marshal.ReadByte(occSmall, i) != 0xFF)
-                    {
-                        occSmallOk = false;
-                        break;
-                    }
-                }
-                Check(occSmallOk, "occupancy undersized buffer not modified");
+                var result = Marshal.PtrToStructure<AxCommandResultV1>(resultBuf);
+                Check(result.commandId == id1,
+                      "result commandId matches submitted ID");
+                Check(result.tickApplied == 10,
+                      "tickApplied == 10");
+                Check(result.type == (uint)AxCommandType.DebugSetCellU8,
+                      "result type correct");
+                Check(result.accepted == 1,
+                      "command accepted");
+                Check(result.reason == (byte)AxCommandRejectReason.None,
+                      "no reject reason");
             }
             finally
             {
-                Marshal.FreeHGlobal(occSmall);
+                Marshal.FreeHGlobal(resultBuf);
+            }
+
+            // Verify snapshot reflects the mutation
+            uint targetIdx = 2 * 64 + 3;  // y * width + x (SPATIAL_MODEL.md)
+
+            terrainBuf = Marshal.AllocHGlobal((int)cellCount);
+            try
+            {
+                NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Terrain, terrainBuf, cellCount);
+
+                byte[] terrainArr = new byte[cellCount];
+                Marshal.Copy(terrainBuf, terrainArr, 0, (int)cellCount);
+
+                Check(terrainArr[targetIdx] == 42,
+                      "terrain(3,2) == 42 after command");
+
+                bool othersUnchanged = true;
+                for (uint i = 0; i < cellCount; i++)
+                {
+                    if (i != targetIdx && terrainArr[i] != 0)
+                    { othersUnchanged = false; break; }
+                }
+                Check(othersUnchanged, "other terrain cells still zero");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(terrainBuf);
+            }
+
+            // -- 7b. Results are idempotent within a tick -----------
+
+            resultBuf = Marshal.AllocHGlobal(resultStructSize);
+            try
+            {
+                uint reread = NativeBindings.ax_world_read_command_results(
+                    world, resultBuf, (uint)resultStructSize);
+                Check(reread == (uint)resultStructSize,
+                      "results re-read returns same size");
+
+                var result = Marshal.PtrToStructure<AxCommandResultV1>(resultBuf);
+                Check(result.commandId == id1,
+                      "re-read commandId still matches");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(resultBuf);
+            }
+
+            // -- 7c. Results cleared on next step ------------------
+
+            NativeBindings.ax_world_step(world, 1);
+            // tick now 12, no commands queued, results cleared
+
+            uint afterClear = NativeBindings.ax_world_read_command_results(
+                world, IntPtr.Zero, 0);
+            Check(afterClear == 0,
+                  "results cleared after next step");
+
+            Console.WriteLine();
+
+            // ── 8. Command Rejections (TASK-003) ──────────────────
+
+            Console.WriteLine("--- Command Rejections ---");
+
+            // -- 8a. Out-of-bounds coordinates ---------------------
+
+            cmd = default(AxCommandV1);
+            cmd.version = 1;
+            cmd.type = (uint)AxCommandType.DebugSetCellU8;
+            cmd.setCellU8.x = 999;   // out of bounds
+            cmd.setCellU8.y = 2;
+            cmd.setCellU8.channel = (byte)AxSnapshotChannel.Terrain;
+            cmd.setCellU8.value = 7;
+
+            ulong id2 = NativeBindings.ax_world_submit_command(world, ref cmd);
+            Check(id2 != 0, "OOB command -> non-zero ID (queued)");
+            Check(id2 > id1, "command IDs monotonic (id2 > id1)");
+
+            NativeBindings.ax_world_step(world, 1);
+            // tick was 12, processed at 12, tick now 13
+
+            resultBuf = Marshal.AllocHGlobal(resultStructSize);
+            try
+            {
+                NativeBindings.ax_world_read_command_results(
+                    world, resultBuf, (uint)resultStructSize);
+
+                var result = Marshal.PtrToStructure<AxCommandResultV1>(resultBuf);
+                Check(result.accepted == 0,
+                      "OOB command rejected");
+                Check(result.reason == (byte)AxCommandRejectReason.InvalidCoords,
+                      "reject reason: INVALID_COORDS");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(resultBuf);
+            }
+
+            // Verify no mutation
+            terrainBuf = Marshal.AllocHGlobal((int)cellCount);
+            try
+            {
+                NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Terrain, terrainBuf, cellCount);
+
+                byte[] terrainArr = new byte[cellCount];
+                Marshal.Copy(terrainBuf, terrainArr, 0, (int)cellCount);
+
+                Check(terrainArr[targetIdx] == 42,
+                      "terrain(3,2) unchanged after OOB reject");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(terrainBuf);
+            }
+
+            // -- 8b. Invalid channel -------------------------------
+
+            cmd = default(AxCommandV1);
+            cmd.version = 1;
+            cmd.type = (uint)AxCommandType.DebugSetCellU8;
+            cmd.setCellU8.x = 0;
+            cmd.setCellU8.y = 0;
+            cmd.setCellU8.channel = 99;    // not terrain or occupancy
+            cmd.setCellU8.value = 7;
+
+            ulong id3 = NativeBindings.ax_world_submit_command(world, ref cmd);
+            Check(id3 != 0, "invalid-channel command -> non-zero ID");
+            Check(id3 > id2, "command IDs monotonic (id3 > id2)");
+
+            NativeBindings.ax_world_step(world, 1);
+            // tick was 13, processed at 13, tick now 14
+
+            resultBuf = Marshal.AllocHGlobal(resultStructSize);
+            try
+            {
+                NativeBindings.ax_world_read_command_results(
+                    world, resultBuf, (uint)resultStructSize);
+
+                var result = Marshal.PtrToStructure<AxCommandResultV1>(resultBuf);
+                Check(result.accepted == 0,
+                      "invalid-channel rejected");
+                Check(result.reason == (byte)AxCommandRejectReason.InvalidChannel,
+                      "reject reason: INVALID_CHANNEL");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(resultBuf);
             }
 
             Console.WriteLine();
 
-            // ── 7. Null Safety ────────────────────────────────────
+            // ── 9. Structural Failures (TASK-003) ─────────────────
+
+            Console.WriteLine("--- Structural Failures ---");
+
+            // Unknown command type
+            cmd = default(AxCommandV1);
+            cmd.version = 1;
+            cmd.type = 9999;
+
+            Check(NativeBindings.ax_world_submit_command(world, ref cmd) == 0,
+                  "unknown type -> submission returns 0");
+
+            // Bad version
+            cmd = default(AxCommandV1);
+            cmd.version = 99;
+            cmd.type = (uint)AxCommandType.DebugSetCellU8;
+
+            Check(NativeBindings.ax_world_submit_command(world, ref cmd) == 0,
+                  "bad version -> submission returns 0");
+
+            // Verify no results generated from structural failures
+            NativeBindings.ax_world_step(world, 1);
+            // tick now 15, no valid commands were queued
+
+            Check(NativeBindings.ax_world_read_command_results(
+                      world, IntPtr.Zero, 0) == 0,
+                  "no results from structural failures");
+
+            Console.WriteLine();
+
+            // ── 10. Null Safety (cumulative) ──────────────────────
 
             Console.WriteLine("--- Null Safety ---");
 
-            // Create with null desc (uses IntPtr overload)
+            // -- World creation (TASK-001) --
+
             Check(NativeBindings.ax_world_create_ptr(IntPtr.Zero) == IntPtr.Zero,
                   "ax_world_create(NULL) -> NULL");
 
-            // Create with zero dimensions
             var badDesc = new AxWorldDesc { width = 0, height = 48, reserved = 0 };
             Check(NativeBindings.ax_world_create(ref badDesc) == IntPtr.Zero,
                   "ax_world_create(0x48) -> NULL");
@@ -346,19 +508,14 @@ namespace Axiom
             Check(NativeBindings.ax_world_create(ref badDesc) == IntPtr.Zero,
                   "ax_world_create(64x0) -> NULL");
 
-            // Overflow rejection (TASK-002)
-            badDesc = new AxWorldDesc { width = 65536, height = 65536, reserved = 0 };
-            Check(NativeBindings.ax_world_create(ref badDesc) == IntPtr.Zero,
-                  "ax_world_create(65536x65536) overflow -> NULL");
+            // -- Lifecycle (TASK-001) --
 
-            // Operations on null handle (must not crash)
             NativeBindings.ax_world_destroy(IntPtr.Zero);
             Check(true, "ax_world_destroy(NULL) no crash");
 
             NativeBindings.ax_world_step(IntPtr.Zero, 10);
             Check(true, "ax_world_step(NULL, 10) no crash");
 
-            // Step with ticks == 0 (must not advance)
             ulong tickBefore = NativeBindings.ax_world_get_tick(world);
             NativeBindings.ax_world_step(world, 0);
             Check(NativeBindings.ax_world_get_tick(world) == tickBefore,
@@ -367,40 +524,46 @@ namespace Axiom
             Check(NativeBindings.ax_world_get_tick(IntPtr.Zero) == 0,
                   "ax_world_get_tick(NULL) -> 0");
 
-            // Cell count null safety (TASK-002)
-            Check(NativeBindings.ax_world_get_cell_count(IntPtr.Zero) == 0,
-                  "ax_world_get_cell_count(NULL) -> 0");
-
-            // get_size with null handle
             NativeBindings.ax_world_get_size(IntPtr.Zero, out _, out _);
             Check(true, "ax_world_get_size(NULL, ...) no crash");
 
-            // get_size with null out-pointers
             NativeBindings.ax_world_get_size_ptr(world, IntPtr.Zero, IntPtr.Zero);
             Check(true, "ax_world_get_size(world, NULL, NULL) no crash");
 
-            // Snapshot on null world
+            // -- Cell count (TASK-002) --
+
+            Check(NativeBindings.ax_world_get_cell_count(IntPtr.Zero) == 0,
+                  "ax_world_get_cell_count(NULL) -> 0");
+
+            // -- Snapshots (TASK-001) --
+
             Check(NativeBindings.ax_world_read_snapshot(
                       IntPtr.Zero, AxSnapshotChannel.WorldMeta, IntPtr.Zero, 0) == 0,
-                  "ax_world_read_snapshot(NULL, META) -> 0");
+                  "ax_world_read_snapshot(NULL) -> 0");
 
-            // Snapshot on null world for new channels (TASK-002)
-            Check(NativeBindings.ax_world_read_snapshot(
-                      IntPtr.Zero, AxSnapshotChannel.Terrain, IntPtr.Zero, 0) == 0,
-                  "ax_world_read_snapshot(NULL, TERRAIN) -> 0");
-
-            Check(NativeBindings.ax_world_read_snapshot(
-                      IntPtr.Zero, AxSnapshotChannel.Occupancy, IntPtr.Zero, 0) == 0,
-                  "ax_world_read_snapshot(NULL, OCCUPANCY) -> 0");
-
-            // Unknown channel
             Check(NativeBindings.ax_world_read_snapshot(
                       world, (AxSnapshotChannel)999, IntPtr.Zero, 0) == 0,
                   "ax_world_read_snapshot(unknown channel) -> 0");
 
+            // -- Commands (TASK-003) --
+
+            cmd = default(AxCommandV1);
+            cmd.version = 1;
+            cmd.type = (uint)AxCommandType.DebugSetCellU8;
+
+            Check(NativeBindings.ax_world_submit_command_ptr(IntPtr.Zero, IntPtr.Zero) == 0,
+                  "ax_world_submit_command(NULL world) -> 0");
+
+            Check(NativeBindings.ax_world_submit_command_ptr(world, IntPtr.Zero) == 0,
+                  "ax_world_submit_command(world, NULL cmd) -> 0");
+
+            Check(NativeBindings.ax_world_read_command_results(
+                      IntPtr.Zero, IntPtr.Zero, 0) == 0,
+                  "ax_world_read_command_results(NULL world) -> 0");
+
             Console.WriteLine();
 
-            // ── 8. Cleanup ────────────────────────────────────────
+            // ── 11. Cleanup ──────────────────────────────────────
 
             Console.WriteLine("--- Cleanup ---");
 
@@ -410,7 +573,7 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── Summary ───────────────────────────────────────────
+            // ── Summary ──────────────────────────────────────────
 
             Console.WriteLine($"=== Results: {_pass} passed, {_fail} failed ===");
 

@@ -19,6 +19,7 @@
 #include <cstdio>    // snprintf
 #include <cstring>   // memcpy, memset
 #include <new>       // nothrow
+#include <climits>   // UINT32_MAX
 
 /* ── Build configuration ─────────────────────────────────────────
  *
@@ -118,6 +119,12 @@ ax_world_handle ax_world_create(const ax_world_desc* desc)
     if (desc->width == 0)   return nullptr;
     if (desc->height == 0)  return nullptr;
 
+    /* Overflow check: ensure width * height fits in uint32_t.
+     * Compute in 64-bit to detect overflow safely.
+     * See TASK-002: grid allocation requires cellCount to be valid. */
+    uint64_t cellCount = (uint64_t)desc->width * (uint64_t)desc->height;
+    if (cellCount > UINT32_MAX) return nullptr;
+
     auto* world = new (std::nothrow) axiom::World(desc->width, desc->height);
     return to_handle(world);  /* nullptr on allocation failure */
 }
@@ -151,6 +158,13 @@ void ax_world_get_size(ax_world_handle world,
     if (outHeight) *outHeight = to_world(world)->height();
 }
 
+uint32_t ax_world_get_cell_count(ax_world_handle world)
+{
+    if (!world) return 0;
+
+    return to_world(world)->cellCount();
+}
+
 /* ── Snapshots ───────────────────────────────────────────────────
  *
  * Caller-allocated buffer pattern:
@@ -175,32 +189,56 @@ uint32_t ax_world_read_snapshot(ax_world_handle world,
 
     switch (channel)
     {
-    case AX_SNAP_WORLD_META:
-    {
-        const uint32_t required = (uint32_t)sizeof(ax_world_meta_snapshot_v1);
+        case AX_SNAP_WORLD_META:
+        {
+            const uint32_t required = (uint32_t)sizeof(ax_world_meta_snapshot_v1);
 
-        /* Size query or insufficient buffer → return required size */
-        if (!outBuffer || outBufferSizeBytes < required)
+            /* Size query or insufficient buffer → return required size */
+            if (!outBuffer || outBufferSizeBytes < required)
+                return required;
+
+            /* Populate snapshot from current world state */
+            axiom::World* w = to_world(world);
+
+            ax_world_meta_snapshot_v1 snap;
+            std::memset(&snap, 0, sizeof(snap));
+
+            snap.version   = AX_WORLD_META_SNAPSHOT_VERSION;
+            snap.sizeBytes = required;
+            snap.tick      = w->tick();
+            snap.width     = w->width();
+            snap.height    = w->height();
+            /* snap.reserved is already 0 from memset */
+
+            std::memcpy(outBuffer, &snap, required);
             return required;
+        }
 
-        /* Populate snapshot from current world state */
-        axiom::World* w = to_world(world);
+        case AX_SNAP_TERRAIN:
+        {
+            axiom::World* w = to_world(world);
+            const uint32_t required = w->cellCount();
 
-        ax_world_meta_snapshot_v1 snap;
-        std::memset(&snap, 0, sizeof(snap));
+            if (!outBuffer || outBufferSizeBytes < required)
+                return required;
 
-        snap.version   = AX_WORLD_META_SNAPSHOT_VERSION;
-        snap.sizeBytes = required;
-        snap.tick      = w->tick();
-        snap.width     = w->width();
-        snap.height    = w->height();
-        /* snap.reserved is already 0 from memset */
+            std::memcpy(outBuffer, w->terrain(), required);
+            return required;
+        }
 
-        std::memcpy(outBuffer, &snap, required);
-        return required;
-    }
+        case AX_SNAP_OCCUPANCY:
+        {
+            axiom::World* w = to_world(world);
+            const uint32_t required = w->cellCount();
 
-    default:
-        return 0;  /* Unknown channel */
+            if (!outBuffer || outBufferSizeBytes < required)
+                return required;
+
+            std::memcpy(outBuffer, w->occupancy(), required);
+            return required;
+        }
+
+        default:
+            return 0;  /* Unknown channel */
     }
 }

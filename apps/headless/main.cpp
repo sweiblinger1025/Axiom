@@ -2,22 +2,27 @@
  * main.cpp — Axiom Headless Runner
  *
  * TASK-001: World lifecycle + tick loop + minimal observation.
+ * TASK-002: Spatial grid channels (terrain + occupancy snapshots).
  *
  * Validates:
  *   - ABI compatibility (retained from TASK-000)
  *   - World creation and destruction
+ *   - Cell count query
  *   - Tick advancement
  *   - Snapshot read (caller-allocated buffer pattern)
+ *   - Terrain and occupancy snapshot channels
  *   - Null-safety of all API functions
  *
- * See TASK-001.md for acceptance criteria.
+ * See TASK-001.md and TASK-002.md for acceptance criteria.
  */
 
 #include "ax_api.h"
 
+#include <cstdint>   // uint8_t
 #include <cstdio>
 #include <cstdlib>   // EXIT_SUCCESS, EXIT_FAILURE
 #include <cstring>   // memset
+#include <vector>    // test buffers
 
 /* ── Test helper ─────────────────────────────────────────────── */
 
@@ -39,7 +44,7 @@ static void check(bool condition, const char* label)
 
 int main()
 {
-    std::printf("=== Axiom Headless -- TASK-001 Validation ===\n\n");
+    std::printf("=== Axiom Headless -- TASK-002 Validation ===\n\n");
 
     /* ── 1. ABI compatibility (from TASK-000) ──────────────────── */
 
@@ -74,6 +79,10 @@ int main()
     check(w == 64, "width == 64");
     check(h == 48, "height == 48");
 
+    /* Cell count (TASK-002) */
+    check(ax_world_get_cell_count(world) == 64 * 48,
+          "cell count == 3072");
+
     /* Initial tick */
     check(ax_world_get_tick(world) == 0, "initial tick == 0");
 
@@ -91,7 +100,7 @@ int main()
 
     std::printf("\n");
 
-    /* ── 4. Snapshot read ──────────────────────────────────────── */
+    /* ── 4. Snapshot: World Meta (TASK-001) ─────────────────────── */
 
     std::printf("--- Snapshot (World Meta) ---\n");
 
@@ -154,7 +163,111 @@ int main()
 
     std::printf("\n");
 
-    /* ── 5. Null-safety ────────────────────────────────────────── */
+    /* ── 5. Snapshot: Terrain (TASK-002) ───────────────────────── */
+
+    std::printf("--- Snapshot (Terrain) ---\n");
+
+    const uint32_t cellCount = ax_world_get_cell_count(world);
+
+    /* Size query */
+    uint32_t terrainRequired = ax_world_read_snapshot(
+        world, AX_SNAP_TERRAIN, nullptr, 0);
+
+    check(terrainRequired == cellCount,
+          "terrain size query == cellCount");
+
+    /* Full read */
+    std::vector<uint8_t> terrainBuf(cellCount, 0xFF);
+
+    uint32_t terrainWritten = ax_world_read_snapshot(
+        world, AX_SNAP_TERRAIN, terrainBuf.data(), cellCount);
+
+    check(terrainWritten == cellCount,
+          "terrain read returns cellCount bytes");
+
+    /* Verify all zeros (default initialization) */
+    bool terrainAllZero = true;
+    for (uint32_t i = 0; i < cellCount; ++i) {
+        if (terrainBuf[i] != 0) {
+            terrainAllZero = false;
+            break;
+        }
+    }
+    check(terrainAllZero, "terrain data all zeros");
+
+    /* Undersized buffer returns required size */
+    std::vector<uint8_t> terrainSmall(4, 0xFF);
+
+    uint32_t terrainUndersized = ax_world_read_snapshot(
+        world, AX_SNAP_TERRAIN, terrainSmall.data(), 4);
+
+    check(terrainUndersized == cellCount,
+          "terrain undersized buffer returns required size");
+
+    /* Verify undersized buffer was not modified */
+    bool terrainSmallOk = true;
+    for (size_t i = 0; i < terrainSmall.size(); ++i) {
+        if (terrainSmall[i] != 0xFF) {
+            terrainSmallOk = false;
+            break;
+        }
+    }
+    check(terrainSmallOk, "terrain undersized buffer not modified");
+
+    std::printf("\n");
+
+    /* ── 6. Snapshot: Occupancy (TASK-002) ─────────────────────── */
+
+    std::printf("--- Snapshot (Occupancy) ---\n");
+
+    /* Size query */
+    uint32_t occRequired = ax_world_read_snapshot(
+        world, AX_SNAP_OCCUPANCY, nullptr, 0);
+
+    check(occRequired == cellCount,
+          "occupancy size query == cellCount");
+
+    /* Full read */
+    std::vector<uint8_t> occBuf(cellCount, 0xFF);
+
+    uint32_t occWritten = ax_world_read_snapshot(
+        world, AX_SNAP_OCCUPANCY, occBuf.data(), cellCount);
+
+    check(occWritten == cellCount,
+          "occupancy read returns cellCount bytes");
+
+    /* Verify all zeros (default initialization) */
+    bool occAllZero = true;
+    for (uint32_t i = 0; i < cellCount; ++i) {
+        if (occBuf[i] != 0) {
+            occAllZero = false;
+            break;
+        }
+    }
+    check(occAllZero, "occupancy data all zeros");
+
+    /* Undersized buffer returns required size */
+    std::vector<uint8_t> occSmall(4, 0xFF);
+
+    uint32_t occUndersized = ax_world_read_snapshot(
+        world, AX_SNAP_OCCUPANCY, occSmall.data(), 4);
+
+    check(occUndersized == cellCount,
+          "occupancy undersized buffer returns required size");
+
+    /* Verify undersized buffer was not modified */
+    bool occSmallOk = true;
+    for (size_t i = 0; i < occSmall.size(); ++i) {
+        if (occSmall[i] != 0xFF) {
+            occSmallOk = false;
+            break;
+        }
+    }
+    check(occSmallOk, "occupancy undersized buffer not modified");
+
+    std::printf("\n");
+
+    /* ── 7. Null-safety ────────────────────────────────────────── */
 
     std::printf("--- Null Safety ---\n");
 
@@ -174,6 +287,12 @@ int main()
     check(ax_world_create(&bad_desc) == nullptr,
           "ax_world_create(64x0) -> NULL");
 
+    /* Overflow rejection (TASK-002):
+     * 65536 * 65536 = 4294967296 which exceeds UINT32_MAX */
+    bad_desc.width = 65536; bad_desc.height = 65536;
+    check(ax_world_create(&bad_desc) == nullptr,
+          "ax_world_create(65536x65536) overflow -> NULL");
+
     /* Operations on null handle (must not crash) */
     ax_world_destroy(nullptr);
     check(true, "ax_world_destroy(NULL) no crash");
@@ -190,6 +309,10 @@ int main()
     check(ax_world_get_tick(nullptr) == 0,
           "ax_world_get_tick(NULL) -> 0");
 
+    /* Cell count null safety (TASK-002) */
+    check(ax_world_get_cell_count(nullptr) == 0,
+          "ax_world_get_cell_count(NULL) -> 0");
+
     /* get_size with null handle and null out-pointers */
     ax_world_get_size(nullptr, &w, &h);
     check(true, "ax_world_get_size(NULL, ...) no crash");
@@ -201,13 +324,20 @@ int main()
     check(ax_world_read_snapshot(nullptr, AX_SNAP_WORLD_META, nullptr, 0) == 0,
           "ax_world_read_snapshot(NULL) -> 0");
 
+    /* Snapshot on null world for new channels (TASK-002) */
+    check(ax_world_read_snapshot(nullptr, AX_SNAP_TERRAIN, nullptr, 0) == 0,
+          "ax_world_read_snapshot(NULL, TERRAIN) -> 0");
+
+    check(ax_world_read_snapshot(nullptr, AX_SNAP_OCCUPANCY, nullptr, 0) == 0,
+          "ax_world_read_snapshot(NULL, OCCUPANCY) -> 0");
+
     /* Unknown channel */
     check(ax_world_read_snapshot(world, (ax_snapshot_channel)999, nullptr, 0) == 0,
           "ax_world_read_snapshot(unknown channel) -> 0");
 
     std::printf("\n");
 
-    /* ── 6. Cleanup ────────────────────────────────────────────── */
+    /* ── 8. Cleanup ────────────────────────────────────────────── */
 
     std::printf("--- Cleanup ---\n");
 

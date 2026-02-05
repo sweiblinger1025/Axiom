@@ -2,16 +2,18 @@
  * world.h - Axiom World (simulation truth)
  *
  * The World is the authoritative runtime object that owns all
- * simulation state. For TASK-001, that state is minimal:
- *   - world dimmensions (immmutable)
- *   - tick counter
+ * simulation state.
+ *
+ * TASK-001: dimensions + tick counter
+ * TASK-002: spatial grid (terrain + occupancy SoA channels)
  *
  * This is internal engine code. External access occurs only
  * through the C API (ax_api.h).
  *
  * Governing docs:
  *   ARCHITECTURE_OVERVIEW.md  - "C++ Owns Truth"
- *   SPATIAL_MODEL.md          - coordinate system, bounds
+ *   SPATIAL_MODEL.md          - coordinate system, indexing, bounds
+ *   DECISIONS.md D006         - SoA for per-cell fields
  *   TRUTH_VS_PRESENTATION.md  - no presentation concerns here
  */
 
@@ -19,6 +21,7 @@
 #define AXIOM_CORE_WORLD_H
 
 #include <cstdint>
+#include <vector>
 
 namespace axiom {
 
@@ -31,12 +34,15 @@ public:
      * Preconditions (enforced by caller - the C API layer):
      *   width > 0
      *   height > 0
+     *   width * height does not overflow uint32_t
      *
      * Initial state:
      *   tick = 0
+     *   all terrain cells = 0 (empty)
+     *   all occupancy cells = 0 (unoccupied)
      *
-     *  Dimensions are immutable after construction.
-     *  See SPATIAL_MODEL.md: "Bounds are defined at world creation time."
+     * Dimensions and cell count are immutable after construction.
+     * See SPATIAL_MODEL.md: "Bounds are defined at world creation time."
      */
     World(uint32_t width, uint32_t height);
 
@@ -56,25 +62,41 @@ public:
      * Advances the simulation by the given number of ticks.
      * Each tick increments the counter by 1.
      *
-     * For TASK-001 there are no simulation systems - this just
-     * advances the counter. Future milestones will add system
-     * updates within each tick.
-     *
      * Precondition: count > 0 (enforced by caller).
      * See DECISIONS.md D001: "10 Hz fixed simulation tick."
      */
     void step(uint32_t count);
 
-    /* -- State queries ------------------------------------ */
+    /* --- State queries ------------------------------------ */
 
-    uint64_t tick() const  { return m_tick; }
-    uint32_t width() const { return m_width; }
-    uint32_t height() const { return m_height; }
+    uint64_t tick() const       { return m_tick; }
+    uint32_t width() const      { return m_width; }
+    uint32_t height() const     { return m_height; }
+    uint32_t cellCount() const  { return m_cellCount; }
+
+    /* --- Channel data access (read-only) ------------------
+     *
+     * Returns pointers to contiguous SoA arrays.
+     * Length of each array = m_cellCount.
+     * Indexed by: index = y * width + x
+     *
+     * See SPATIAL_MODEL.md: canonical linear index.
+     * See DECISIONS.md D006: SoA for per-cell fields.
+     */
+    const uint8_t* terrain() const   { return m_terrain.data(); }
+    const uint8_t* occupancy() const { return m_occupancy.data(); }
 
 private:
     uint32_t m_width;
     uint32_t m_height;
+    uint32_t m_cellCount;
     uint64_t m_tick = 0;
+
+    /* Per-cell SoA channels.
+     * Fixed-size after construction, logically immutable until
+     * future tasks add commands or simulation systems. */
+    std::vector<uint8_t> m_terrain;
+    std::vector<uint8_t> m_occupancy;
 };
 
 } // namespace axiom

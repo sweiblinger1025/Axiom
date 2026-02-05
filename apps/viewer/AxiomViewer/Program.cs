@@ -2,15 +2,18 @@
  * Program.cs — Axiom Viewer entry point
  *
  * TASK-001: World lifecycle + tick loop + minimal observation.
+ * TASK-002: Spatial grid channels (terrain + occupancy snapshots).
  *
- * Validates the same 31 checks as the headless runner, but from
+ * Validates the same checks as the headless runner, but from
  * managed code via P/Invoke. Proves that:
  *   - World creation and destruction work across the ABI
+ *   - Cell count query works
  *   - Tick advancement is deterministic
  *   - Snapshot reads work with caller-allocated buffers
+ *   - Terrain and occupancy channels round-trip correctly
  *   - All null-safety guarantees hold from C#
  *
- * See TASK-001.md for acceptance criteria.
+ * See TASK-001.md and TASK-002.md for acceptance criteria.
  */
 
 using System;
@@ -42,7 +45,7 @@ namespace Axiom
 
         static int Main(string[] args)
         {
-            Console.WriteLine("=== Axiom Viewer -- TASK-001 Validation (C#) ===");
+            Console.WriteLine("=== Axiom Viewer -- TASK-002 Validation (C#) ===");
             Console.WriteLine();
 
             // ── 1. ABI Checks (from TASK-000) ─────────────────────
@@ -81,6 +84,10 @@ namespace Axiom
             Check(w == 64, "width == 64");
             Check(h == 48, "height == 48");
 
+            // Cell count (TASK-002)
+            Check(NativeBindings.ax_world_get_cell_count(world) == 64u * 48u,
+                  "cell count == 3072");
+
             // Initial tick
             Check(NativeBindings.ax_world_get_tick(world) == 0, "initial tick == 0");
 
@@ -98,7 +105,7 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 4. Snapshot Read ──────────────────────────────────
+            // ── 4. Snapshot: World Meta (TASK-001) ────────────────
 
             Console.WriteLine("--- Snapshot (World Meta) ---");
 
@@ -176,7 +183,153 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 5. Null Safety ────────────────────────────────────
+            // ── 5. Snapshot: Terrain (TASK-002) ───────────────────
+
+            Console.WriteLine("--- Snapshot (Terrain) ---");
+
+            uint cellCount = NativeBindings.ax_world_get_cell_count(world);
+
+            // Size query
+            uint terrainRequired = NativeBindings.ax_world_read_snapshot(
+                world, AxSnapshotChannel.Terrain, IntPtr.Zero, 0);
+
+            Check(terrainRequired == cellCount,
+                  "terrain size query == cellCount");
+
+            // Full read
+            IntPtr terrainBuf = Marshal.AllocHGlobal((int)cellCount);
+            try
+            {
+                // Fill with sentinel
+                for (int i = 0; i < (int)cellCount; i++)
+                    Marshal.WriteByte(terrainBuf, i, 0xFF);
+
+                uint terrainWritten = NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Terrain, terrainBuf, cellCount);
+
+                Check(terrainWritten == cellCount,
+                      "terrain read returns cellCount bytes");
+
+                // Verify all zeros
+                bool terrainAllZero = true;
+                for (int i = 0; i < (int)cellCount; i++)
+                {
+                    if (Marshal.ReadByte(terrainBuf, i) != 0)
+                    {
+                        terrainAllZero = false;
+                        break;
+                    }
+                }
+                Check(terrainAllZero, "terrain data all zeros");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(terrainBuf);
+            }
+
+            // Undersized buffer
+            IntPtr terrainSmall = Marshal.AllocHGlobal(4);
+            try
+            {
+                for (int i = 0; i < 4; i++)
+                    Marshal.WriteByte(terrainSmall, i, 0xFF);
+
+                uint terrainUndersized = NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Terrain, terrainSmall, 4);
+
+                Check(terrainUndersized == cellCount,
+                      "terrain undersized buffer returns required size");
+
+                bool terrainSmallOk = true;
+                for (int i = 0; i < 4; i++)
+                {
+                    if (Marshal.ReadByte(terrainSmall, i) != 0xFF)
+                    {
+                        terrainSmallOk = false;
+                        break;
+                    }
+                }
+                Check(terrainSmallOk, "terrain undersized buffer not modified");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(terrainSmall);
+            }
+
+            Console.WriteLine();
+
+            // ── 6. Snapshot: Occupancy (TASK-002) ─────────────────
+
+            Console.WriteLine("--- Snapshot (Occupancy) ---");
+
+            // Size query
+            uint occRequired = NativeBindings.ax_world_read_snapshot(
+                world, AxSnapshotChannel.Occupancy, IntPtr.Zero, 0);
+
+            Check(occRequired == cellCount,
+                  "occupancy size query == cellCount");
+
+            // Full read
+            IntPtr occBuf = Marshal.AllocHGlobal((int)cellCount);
+            try
+            {
+                for (int i = 0; i < (int)cellCount; i++)
+                    Marshal.WriteByte(occBuf, i, 0xFF);
+
+                uint occWritten = NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Occupancy, occBuf, cellCount);
+
+                Check(occWritten == cellCount,
+                      "occupancy read returns cellCount bytes");
+
+                bool occAllZero = true;
+                for (int i = 0; i < (int)cellCount; i++)
+                {
+                    if (Marshal.ReadByte(occBuf, i) != 0)
+                    {
+                        occAllZero = false;
+                        break;
+                    }
+                }
+                Check(occAllZero, "occupancy data all zeros");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(occBuf);
+            }
+
+            // Undersized buffer
+            IntPtr occSmall = Marshal.AllocHGlobal(4);
+            try
+            {
+                for (int i = 0; i < 4; i++)
+                    Marshal.WriteByte(occSmall, i, 0xFF);
+
+                uint occUndersized = NativeBindings.ax_world_read_snapshot(
+                    world, AxSnapshotChannel.Occupancy, occSmall, 4);
+
+                Check(occUndersized == cellCount,
+                      "occupancy undersized buffer returns required size");
+
+                bool occSmallOk = true;
+                for (int i = 0; i < 4; i++)
+                {
+                    if (Marshal.ReadByte(occSmall, i) != 0xFF)
+                    {
+                        occSmallOk = false;
+                        break;
+                    }
+                }
+                Check(occSmallOk, "occupancy undersized buffer not modified");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(occSmall);
+            }
+
+            Console.WriteLine();
+
+            // ── 7. Null Safety ────────────────────────────────────
 
             Console.WriteLine("--- Null Safety ---");
 
@@ -192,6 +345,11 @@ namespace Axiom
             badDesc = new AxWorldDesc { width = 64, height = 0, reserved = 0 };
             Check(NativeBindings.ax_world_create(ref badDesc) == IntPtr.Zero,
                   "ax_world_create(64x0) -> NULL");
+
+            // Overflow rejection (TASK-002)
+            badDesc = new AxWorldDesc { width = 65536, height = 65536, reserved = 0 };
+            Check(NativeBindings.ax_world_create(ref badDesc) == IntPtr.Zero,
+                  "ax_world_create(65536x65536) overflow -> NULL");
 
             // Operations on null handle (must not crash)
             NativeBindings.ax_world_destroy(IntPtr.Zero);
@@ -209,18 +367,31 @@ namespace Axiom
             Check(NativeBindings.ax_world_get_tick(IntPtr.Zero) == 0,
                   "ax_world_get_tick(NULL) -> 0");
 
-            // get_size with null handle (out params receive uninitialized but no crash)
+            // Cell count null safety (TASK-002)
+            Check(NativeBindings.ax_world_get_cell_count(IntPtr.Zero) == 0,
+                  "ax_world_get_cell_count(NULL) -> 0");
+
+            // get_size with null handle
             NativeBindings.ax_world_get_size(IntPtr.Zero, out _, out _);
             Check(true, "ax_world_get_size(NULL, ...) no crash");
 
-            // get_size with null out-pointers (uses IntPtr overload)
+            // get_size with null out-pointers
             NativeBindings.ax_world_get_size_ptr(world, IntPtr.Zero, IntPtr.Zero);
             Check(true, "ax_world_get_size(world, NULL, NULL) no crash");
 
             // Snapshot on null world
             Check(NativeBindings.ax_world_read_snapshot(
                       IntPtr.Zero, AxSnapshotChannel.WorldMeta, IntPtr.Zero, 0) == 0,
-                  "ax_world_read_snapshot(NULL) -> 0");
+                  "ax_world_read_snapshot(NULL, META) -> 0");
+
+            // Snapshot on null world for new channels (TASK-002)
+            Check(NativeBindings.ax_world_read_snapshot(
+                      IntPtr.Zero, AxSnapshotChannel.Terrain, IntPtr.Zero, 0) == 0,
+                  "ax_world_read_snapshot(NULL, TERRAIN) -> 0");
+
+            Check(NativeBindings.ax_world_read_snapshot(
+                      IntPtr.Zero, AxSnapshotChannel.Occupancy, IntPtr.Zero, 0) == 0,
+                  "ax_world_read_snapshot(NULL, OCCUPANCY) -> 0");
 
             // Unknown channel
             Check(NativeBindings.ax_world_read_snapshot(
@@ -229,7 +400,7 @@ namespace Axiom
 
             Console.WriteLine();
 
-            // ── 6. Cleanup ────────────────────────────────────────
+            // ── 8. Cleanup ────────────────────────────────────────
 
             Console.WriteLine("--- Cleanup ---");
 

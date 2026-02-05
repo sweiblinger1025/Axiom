@@ -24,7 +24,9 @@ namespace Axiom
 
     internal enum AxSnapshotChannel : int
     {
-        WorldMeta = 1
+        WorldMeta = 1,
+        Terrain   = 2,
+        Occupancy = 3,
     }
 
     // ── Interop structs ────────────────────────────────────────
@@ -128,6 +130,15 @@ namespace Axiom
                    EntryPoint = "ax_world_get_size")]
         internal static extern void ax_world_get_size_ptr(
             IntPtr world, IntPtr outWidth, IntPtr outHeight);
+
+        // ── Cell count (TASK-002) ──────────────────────────────
+
+        /// <summary>
+        /// Returns total cell count (width * height).
+        /// Returns 0 if world is NULL.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ax_world_get_cell_count(IntPtr world);
 
         // ── Snapshots ──────────────────────────────────────────
 

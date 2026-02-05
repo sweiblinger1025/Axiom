@@ -218,6 +218,19 @@ AX_API void AX_CALL ax_world_get_size(
     uint32_t* outWidth,
     uint32_t* outHeight);
 
+    /*
+     * Returns the total number of cells in the world grid.
+     *
+     * Equivalent to width * height.
+     * Returns 0 if world is NULL.
+     *
+     * See SPATIAL_MODEL.md: cells are indexed linearly as
+     * index = y * width + x, with total count = width * height.
+     *
+     * C#: [DllImport] IntPtr → uint
+     */
+    AX_API uint32_t AX_CALL ax_world_get_cell_count(ax_world_handle world);
+
 /* ── Snapshots ───────────────────────────────────────────────── */
 
 /*
@@ -229,7 +242,9 @@ AX_API void AX_CALL ax_world_get_size(
  */
 typedef enum ax_snapshot_channel
 {
-    AX_SNAP_WORLD_META = 1
+    AX_SNAP_WORLD_META = 1,
+    AX_SNAP_TERRAIN    = 2,
+    AX_SNAP_OCCUPANCY  = 3,
 } ax_snapshot_channel;
 
 /*

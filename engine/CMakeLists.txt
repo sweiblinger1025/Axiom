@@ -11,16 +11,19 @@
 
 add_library(AxiomCore SHARED
         core/world.cpp
+        core/math/ax_math_safe.cpp
+        core/math/ax_math_selftest.cpp
         bindings/c/src/ax_api.cpp
 )
 
 # ── Include paths ────────────────────────────────────────────────
 # PUBLIC:  consumers linking against AxiomCore get ax_api.h
-# PRIVATE: internal engine headers (core simulation, future subsystems)
+# PRIVATE: internal engine headers (core simulation, math, future subsystems)
 
 target_include_directories(AxiomCore
         PUBLIC  bindings/c/include
         PRIVATE core
+        PRIVATE core/math
         PRIVATE src
 )
 
@@ -31,6 +34,9 @@ target_include_directories(AxiomCore
 # AX_BUILD_TYPE:    baked into ax_get_build_info() output
 # AX_COMPILER_ID:   identifies the compiler (MSVC, Clang, GNU, etc.)
 # AX_PLATFORM:      identifies the target OS
+#
+# AX_MATH_OVERFLOW_ASSERT: (Debug only) enables assert on arithmetic
+#                          overflow per DECISIONS.md D005.
 
 target_compile_definitions(AxiomCore
         PRIVATE
@@ -38,6 +44,7 @@ target_compile_definitions(AxiomCore
         AX_BUILD_TYPE="$<CONFIG>"
         AX_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
         AX_PLATFORM="${CMAKE_SYSTEM_NAME}"
+        $<$<CONFIG:Debug>:AX_MATH_OVERFLOW_ASSERT>
 )
 
 # ── Language standard ────────────────────────────────────────────

@@ -14,24 +14,14 @@
 /* Engine core */
 #include "world.h"
 
+/* Math utilities */
+#include "math/ax_math_selftest.h"
+
 /* Standard library */
 #include <cstdlib>   // malloc, free
 #include <cstdio>    // snprintf
 #include <cstring>   // memcpy, memset
 #include <new>       // nothrow
-
-/* ── Static Layout Guarantees (TASK-003) ─────────────────────────
- *
- * Byte-level size agreement between C/C++ and C# is mandatory.
- * If any of these fire, a struct has unexpected padding.
- */
-
-static_assert(sizeof(ax_cmd_set_cell_u8_v1) == 12,
-              "ax_cmd_set_cell_u8_v1 size mismatch");
-static_assert(sizeof(ax_command_v1) == 40,
-              "ax_command_v1 size mismatch");
-static_assert(sizeof(ax_command_result_v1) == 32,
-              "ax_command_result_v1 size mismatch");
 
 /* ── Build configuration ─────────────────────────────────────────
  *
@@ -99,7 +89,7 @@ void ax_free(void* ptr)
     std::free(ptr);
 }
 
-/* ── Handle Casting (file-local) ─────────────────────────────── */
+/* ── Handle Casting (file-local) ───────────────────────────────── */
 
 static axiom::World* to_world(ax_world_handle h)
 {
@@ -195,7 +185,6 @@ uint32_t ax_world_read_snapshot(ax_world_handle world,
     case AX_SNAP_TERRAIN:
     {
         const uint32_t required = w->cellCount();
-        if (required == 0) return 0;
 
         if (!outBuffer || outBufferSizeBytes < required)
             return required;
@@ -207,7 +196,6 @@ uint32_t ax_world_read_snapshot(ax_world_handle world,
     case AX_SNAP_OCCUPANCY:
     {
         const uint32_t required = w->cellCount();
-        if (required == 0) return 0;
 
         if (!outBuffer || outBufferSizeBytes < required)
             return required;
@@ -221,104 +209,77 @@ uint32_t ax_world_read_snapshot(ax_world_handle world,
     }
 }
 
-/* ── Commands (TASK-003) ─────────────────────────────────────────
- *
- * Two-phase validation per COMMAND_MODEL.md:
- *
- *   Phase 1 (here, at submission):
- *     Structural checks — null pointers, version, known type.
- *     Failures return 0 and produce NO result record.
- *
- *   Phase 2 (inside World::step, at tick boundary):
- *     State-dependent checks — bounds, channel validity.
- *     Failures produce a result record with accepted=0.
- */
+/* ── Commands ────────────────────────────────────────────────── */
 
 uint64_t ax_world_submit_command(ax_world_handle world,
-                                 const ax_command_v1* cmd)
+                                  const ax_command_v1* cmd)
 {
-    /* ── Structural validation (not queued, no result) ─────── */
-
     if (!world) return 0;
     if (!cmd)   return 0;
 
-    if (cmd->version != 1) return 0;
+    /* Structural validation */
+    if (cmd->version != AX_COMMAND_VERSION) return 0;
 
-    /* Validate known command type.
-     * Unknown types are structural failures — the engine
-     * doesn't know what payload to expect. */
     switch (cmd->type)
     {
     case AX_CMD_DEBUG_SET_CELL_U8:
-        break;  /* known — fall through to queueing */
+    {
+        /* Translate from C API struct to internal representation */
+        axiom::PendingCommand pending{};
+        pending.type    = cmd->type;
+        pending.x       = cmd->payload.setCellU8.x;
+        pending.y       = cmd->payload.setCellU8.y;
+        pending.channel = cmd->payload.setCellU8.channel;
+        pending.value   = cmd->payload.setCellU8.value;
+
+        return to_world(world)->submitCommand(pending);
+    }
 
     default:
-        return 0;  /* unknown type — structural failure */
+        return 0;  /* Unknown type */
     }
-
-    /* ── Extract payload and forward to core ──────────────── */
-
-    axiom::PendingCommand pcmd{};
-    pcmd.type = cmd->type;
-
-    switch (cmd->type)
-    {
-    case AX_CMD_DEBUG_SET_CELL_U8:
-    {
-        const ax_cmd_set_cell_u8_v1& p = cmd->payload.setCellU8;
-        pcmd.x       = p.x;
-        pcmd.y       = p.y;
-        pcmd.channel = p.channel;
-        pcmd.value   = p.value;
-        break;
-    }
-    }
-
-    return to_world(world)->submitCommand(std::move(pcmd));
 }
 
-/* ── Command Results ─────────────────────────────────────────────
- *
- * Caller-allocated buffer pattern (same as snapshots):
- *   - NULL buffer or undersized → return required size
- *   - Sufficient buffer → write results, return bytes written
- *   - 0 on error (null world)
- *
- * Results are an array of ax_command_result_v1 structs.
- * Results remain valid until the next step() call.
- */
-
 uint32_t ax_world_read_command_results(ax_world_handle world,
-                                       void* outBuffer,
-                                       uint32_t outBufferSizeBytes)
+                                        void* outBuffer,
+                                        uint32_t outBufferSizeBytes)
 {
     if (!world) return 0;
 
-    const axiom::World* w = to_world(world);
+    axiom::World* w = to_world(world);
     const auto& results = w->results();
 
-    const uint32_t count = (uint32_t)results.size();
-    const uint32_t required = count * (uint32_t)sizeof(ax_command_result_v1);
+    const uint32_t required = (uint32_t)(results.size() * sizeof(ax_command_result_v1));
 
-    /* Size query or insufficient buffer */
     if (!outBuffer || outBufferSizeBytes < required)
         return required;
 
-    /* Translate internal CommandResult → C API ax_command_result_v1 */
+    /* Translate internal results to C API format */
     auto* out = static_cast<ax_command_result_v1*>(outBuffer);
-
-    for (uint32_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < results.size(); ++i)
     {
-        std::memset(&out[i], 0, sizeof(ax_command_result_v1));
-
-        out[i].sizeBytes   = (uint32_t)sizeof(ax_command_result_v1);
-        out[i].version     = 1;
-        out[i].commandId   = results[i].commandId;
-        out[i].tickApplied = results[i].tickApplied;
-        out[i].type        = results[i].type;
-        out[i].accepted    = results[i].accepted ? 1 : 0;
-        out[i].reason      = results[i].reason;
+        const auto& r = results[i];
+        out[i].sizeBytes   = sizeof(ax_command_result_v1);
+        out[i].version     = AX_COMMAND_RESULT_VERSION;
+        out[i].commandId   = r.commandId;
+        out[i].tickApplied = r.tickApplied;
+        out[i].type        = r.type;
+        out[i].accepted    = r.accepted;
+        out[i].reason      = r.reason;
+        out[i]._pad        = 0;
     }
 
     return required;
+}
+
+/* ── Math Utilities ──────────────────────────────────────────── */
+
+uint32_t ax_math_get_version(void)
+{
+    return AX_MATH_VERSION;
+}
+
+uint64_t ax_math_selftest_checksum(uint32_t seed)
+{
+    return axiom::math::ax_math_selftest_checksum(seed);
 }

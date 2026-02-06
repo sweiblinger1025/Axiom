@@ -16,9 +16,28 @@ This document records decisions that are expensive to change later.
 ## D004 — Determinism Policy
 - Determinism first, replayable
 
-## D005 — Fixed-Point Policy
-- Global numeric policy
-- Must be resolved before real physics systems
+## D005 — Canonical Fixed-Point Type
+**Decision:** Domain-specific scaled integers.
+
+**Locked Types (v0):**
+- Temperature: `ax_temp_mK` (int32, milliKelvin)
+- Mass: `ax_mass_mg` (int64, milligram)
+- Energy: `ax_energy_mJ` (int64, milliJoule)
+
+**Overflow Policy:**
+- Debug: assert/trap
+- Release: saturate to type bounds
+
+**Division:** Truncate toward zero by default; explicit floor/round variants available.
+
+**Floating-Point:** Forbidden in math utilities.
+
+**Rationale:**
+Domain-specific types are self-documenting and force explicit dimensional handling.
+Scaled integers (not universal fixed-point) allow optimal range/precision per quantity.
+Integer-only arithmetic guarantees cross-platform determinism.
+
+**Locked by:** TASK-004
 
 ## D006 — Memory Layout
 - SoA for per-cell fields (default)

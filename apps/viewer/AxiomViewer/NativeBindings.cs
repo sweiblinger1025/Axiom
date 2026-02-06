@@ -25,13 +25,12 @@ namespace Axiom
     internal enum AxSnapshotChannel : int
     {
         WorldMeta = 1,
-        Terrain = 2,    // TASK-002
-        Occupancy = 3     // TASK-002
+        Terrain = 2,
+        Occupancy = 3
     }
 
-    // ── Command types ──────────────────────────────────────────
+    // ── Command types ───────────────────────────────────────────
     // Mirrors ax_command_type in ax_api.h.
-    // Wire format is uint32_t; enum backing matches.
 
     internal enum AxCommandType : uint
     {
@@ -39,15 +38,14 @@ namespace Axiom
         DebugSetCellU8 = 1000
     }
 
-    // ── Command reject reasons ─────────────────────────────────
+    // ── Command reject reasons ──────────────────────────────────
     // Mirrors ax_command_reject_reason in ax_api.h.
-    // Wire format is uint8_t; enum backing is byte.
 
-    internal enum AxCommandRejectReason : byte
+    internal static class AxCommandRejectReason
     {
-        None = 0,
-        InvalidCoords = 1,
-        InvalidChannel = 2
+        internal const byte None = 0;
+        internal const byte InvalidCoords = 1;
+        internal const byte InvalidChannel = 2;
     }
 
     // ── Interop structs ────────────────────────────────────────
@@ -64,7 +62,7 @@ namespace Axiom
     }
 
     /// <summary>
-    /// World meta snapshot (version 1). Mirrors ax_world_meta_snapshot_v1.
+    /// World meta snapshot (version 1). Mirrors ax_world_meta_snapshot_v1 in ax_api.h.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct AxWorldMetaSnapshotV1
@@ -78,9 +76,7 @@ namespace Axiom
     }
 
     /// <summary>
-    /// Single-cell set payload for uint8 grids.
-    /// Mirrors ax_cmd_set_cell_u8_v1 in ax_api.h.
-    /// Expected size: 12 bytes.
+    /// Single-cell set command payload. Mirrors ax_cmd_set_cell_u8_v1 in ax_api.h.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct AxCmdSetCellU8V1
@@ -94,24 +90,24 @@ namespace Axiom
 
     /// <summary>
     /// Command descriptor (version 1). Mirrors ax_command_v1 in ax_api.h.
-    /// Uses Explicit layout to model the C union: all payload variants
-    /// overlap at offset 8. Size forced to 40 bytes (8-byte header +
-    /// 32-byte payload union).
-    /// Expected size: 40 bytes.
+    /// Uses explicit layout to model the C union.
     /// </summary>
     [StructLayout(LayoutKind.Explicit, Size = 40)]
     internal struct AxCommandV1
     {
         [FieldOffset(0)] public uint version;
         [FieldOffset(4)] public uint type;
+
+        // Union: payload starts at offset 8
         [FieldOffset(8)] public AxCmdSetCellU8V1 setCellU8;
-        // Future command payloads: add [FieldOffset(8)] fields here.
-        // The _raw[32] union member is implicit from Size = 40.
+
+        // Raw payload access (32 bytes)
+        // Note: Can't overlay a fixed buffer on the struct directly in safe code,
+        // but we don't need it for current usage.
     }
 
     /// <summary>
-    /// Command result (version 1). Mirrors ax_command_result_v1.
-    /// Expected size: 32 bytes.
+    /// Command result (version 1). Mirrors ax_command_result_v1 in ax_api.h.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct AxCommandResultV1
@@ -140,6 +136,13 @@ namespace Axiom
 
         internal const uint AX_ABI_VERSION = 1;
         internal const uint AX_WORLD_META_SNAPSHOT_VERSION = 1;
+        internal const uint AX_MATH_VERSION = 1;
+
+        // ── Expected struct sizes (for validation) ─────────────
+
+        internal const int ExpectedCmdSetCellU8V1Size = 12;
+        internal const int ExpectedCommandV1Size = 40;
+        internal const int ExpectedCommandResultV1Size = 32;
 
         // ── Versioning ─────────────────────────────────────────
 
@@ -149,6 +152,11 @@ namespace Axiom
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern uint ax_get_version_packed();
 
+        /// <summary>
+        /// Returns a pointer to a static string inside the native library.
+        /// Caller must NOT free this pointer.
+        /// Use Marshal.PtrToStringUTF8() to read it.
+        /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ax_get_build_info();
 
@@ -188,19 +196,24 @@ namespace Axiom
 
         /// <summary>
         /// Raw-pointer overload for null-safety testing.
+        /// Allows passing IntPtr.Zero for outWidth/outHeight
+        /// (impossible with the 'out uint' signature).
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
                    EntryPoint = "ax_world_get_size")]
         internal static extern void ax_world_get_size_ptr(
             IntPtr world, IntPtr outWidth, IntPtr outHeight);
 
-        // ── Cell count (TASK-002) ──────────────────────────────
-
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern uint ax_world_get_cell_count(IntPtr world);
 
         // ── Snapshots ──────────────────────────────────────────
 
+        /// <summary>
+        /// Read a snapshot channel. Pass IntPtr.Zero / size 0 to query
+        /// required buffer size. Returns bytes written, or required size,
+        /// or 0 on error.
+        /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern uint ax_world_read_snapshot(
             IntPtr world,
@@ -208,34 +221,54 @@ namespace Axiom
             IntPtr outBuffer,
             uint outBufferSizeBytes);
 
-        // ── Commands (TASK-003) ────────────────────────────────
+        // ── Commands ───────────────────────────────────────────
 
         /// <summary>
         /// Submit a command for processing at the next tick boundary.
-        /// Returns engine-assigned command ID (monotonic, non-zero).
-        /// Returns 0 for structural failures (not queued).
+        /// Returns engine-assigned command ID, or 0 on structural failure.
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern ulong ax_world_submit_command(
-            IntPtr world, ref AxCommandV1 cmd);
+            IntPtr world,
+            ref AxCommandV1 cmd);
 
         /// <summary>
-        /// Raw-pointer overload for null-safety testing (null cmd).
+        /// Raw-pointer overload for null-safety testing.
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl,
                    EntryPoint = "ax_world_submit_command")]
         internal static extern ulong ax_world_submit_command_ptr(
-            IntPtr world, IntPtr cmd);
+            IntPtr world,
+            IntPtr cmd);
 
         /// <summary>
         /// Read command results from the last tick.
-        /// Follows the caller-allocated buffer pattern:
-        ///   - NULL/undersized buffer → returns required size
-        ///   - Sufficient buffer → writes results, returns bytes written
-        ///   - 0 on error (null world)
+        /// Pass IntPtr.Zero / size 0 to query required buffer size.
+        /// Returns bytes written, or required size, or 0 on error.
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern uint ax_world_read_command_results(
-            IntPtr world, IntPtr outBuffer, uint outBufferSizeBytes);
+            IntPtr world,
+            IntPtr outBuffer,
+            uint outBufferSizeBytes);
+
+        // ── Math Utilities (TASK-004) ──────────────────────────
+
+        /// <summary>
+        /// Returns the math subsystem version.
+        /// Consumers should verify: ax_math_get_version() == AX_MATH_VERSION
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ax_math_get_version();
+
+        /// <summary>
+        /// Runs a deterministic battery of arithmetic operations and returns
+        /// a 64-bit checksum. Used to prove cross-language determinism.
+        /// 
+        /// Same seed → same checksum, always.
+        /// C++ checksum must match C# checksum exactly (within same build config).
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ulong ax_math_selftest_checksum(uint seed);
     }
 }

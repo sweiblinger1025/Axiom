@@ -158,6 +158,51 @@ int main()
 
     std::printf("\n");
 
+      /* ── 5. Math Utilities (TASK-004) ──────────────────────────── */
+
+      std::printf("--- Math Utilities (TASK-004) ---\n");
+
+      /* Version check */
+      check(ax_math_get_version() == AX_MATH_VERSION,
+            "ax_math_get_version() == AX_MATH_VERSION");
+
+      /* Canonical selftest */
+      uint64_t checksum0 = ax_math_selftest_checksum(0);
+      check(checksum0 != 0, "selftest checksum(0) non-zero");
+
+      /* Print checksum for cross-language comparison */
+      std::printf("       checksum(0) = 0x%016llX\n",
+                  static_cast<unsigned long long>(checksum0));
+
+      /* Determinism: same seed → same result */
+      uint64_t checksum0_again = ax_math_selftest_checksum(0);
+      check(checksum0 == checksum0_again,
+            "selftest checksum(0) deterministic");
+
+      /* Different seeds → different results */
+      uint64_t checksum1 = ax_math_selftest_checksum(1);
+      uint64_t checksum2 = ax_math_selftest_checksum(2);
+      uint64_t checksum42 = ax_math_selftest_checksum(42);
+      uint64_t checksum1000 = ax_math_selftest_checksum(1000);
+
+      check(checksum1 != checksum0, "checksum(1) != checksum(0)");
+      check(checksum2 != checksum0, "checksum(2) != checksum(0)");
+      check(checksum2 != checksum1, "checksum(2) != checksum(1)");
+      check(checksum42 != checksum0, "checksum(42) != checksum(0)");
+      check(checksum1000 != checksum0, "checksum(1000) != checksum(0)");
+
+      /* Print all for C# comparison */
+      std::printf("       checksum(1)    = 0x%016llX\n",
+                  static_cast<unsigned long long>(checksum1));
+      std::printf("       checksum(2)    = 0x%016llX\n",
+                  static_cast<unsigned long long>(checksum2));
+      std::printf("       checksum(42)   = 0x%016llX\n",
+                  static_cast<unsigned long long>(checksum42));
+      std::printf("       checksum(1000) = 0x%016llX\n",
+                  static_cast<unsigned long long>(checksum1000));
+
+      std::printf("\n");
+
     /* ── 6. Snapshot: Terrain & Occupancy (TASK-002) ───────────── */
 
     std::printf("--- Snapshot (Terrain & Occupancy) ---\n");

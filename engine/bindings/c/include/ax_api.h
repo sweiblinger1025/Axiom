@@ -296,6 +296,50 @@ AX_API uint32_t AX_CALL ax_world_read_snapshot(
     void* outBuffer,
     uint32_t outBufferSizeBytes);
 
+/* ── Math Utilities ──────────────────────────────────────────────
+ *
+ * Minimal API surface for cross-language determinism validation.
+ * The math utilities themselves are internal C++ code; only the
+ * version and selftest checksum are exposed.
+ *
+ * See TASK-004.md for the full numeric policy.
+ */
+
+/*
+ * Math utilities version. Bumped on any change to arithmetic behavior.
+ * Consumers should check this matches their expected version.
+ */
+#define AX_MATH_VERSION 1u
+
+/*
+ * Returns the math utilities version of the loaded library.
+ *
+ * C#: [DllImport] → uint
+ */
+AX_API uint32_t AX_CALL ax_math_get_version(void);
+
+/*
+ * Run a deterministic battery of arithmetic operations and return
+ * a checksum. Used to prove cross-language determinism.
+ *
+ * Contract:
+ *   - Same seed → same checksum, always
+ *   - Same checksum from C++ and C# proves determinism
+ *
+ * Parameters:
+ *   seed: Controls test value generation. seed=0 runs canonical battery.
+ *
+ * Returns:
+ *   64-bit checksum of all operation results.
+ *
+ * Note: Checksum differs between debug and release builds because
+ * overflow test cases are skipped in debug mode (they would trap).
+ *
+ * C#: [DllImport] uint → ulong
+ */
+AX_API uint64_t AX_CALL ax_math_selftest_checksum(uint32_t seed);
+
+
   /* ── Commands ────────────────────────────────────────────────── */
 
 /*

@@ -1,0 +1,13 @@
+# C# / .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Rider/VSCode
+.idea/
+.vscode/
+
+# Native runtime drop (do not commit binaries)
+native/

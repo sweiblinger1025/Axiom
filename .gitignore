@@ -1,0 +1,30 @@
+# Build outputs
+/build/
+/out/
+/cmake-build-*/
+
+# IDEs
+.vscode/
+.idea/
+*.user
+*.user.*
+*.suo
+*.vcxproj*
+*.filters
+*.opensdf
+*.sdf
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs / dumps
+*.log
+*.tmp
+
+# Python cache (if tools added later)
+__pycache__/
+*.pyc
+
+# Optional: local config overrides
+local.*

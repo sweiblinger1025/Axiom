@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdarg>
+#include <cstddef>
 #include <vector>
 #include <cmath>
 
@@ -703,7 +704,78 @@ ax_result ax_get_snapshot_bytes(
     return AX_OK;
 }
 
-/* ── Save / Load (stubs until SAVE_FORMAT.md implementation) ──────── */
+/* ── Save / Load (SAVE_FORMAT.md v0.3) ───────────────────────────── */
+
+/*
+ * On-disk save structures (internal to Core).
+ * All multi-byte values are little-endian (native on x86).
+ * Layout: [ SaveHeaderV1 ][ A1WorldV1 ][ TargetsV1[] ]
+ */
+
+static const uint32_t AX_SAVE_MAGIC = 0x56535841;  /* 'AXSV' */
+
+#pragma pack(push, 1)
+
+struct ax_save_header_v1 {
+    uint32_t magic;              /* 0x56535841 */
+    uint16_t version_major;      /* = 1        */
+    uint16_t version_minor;      /* = 0        */
+    uint32_t total_size_bytes;
+
+    uint32_t world_chunk_offset;
+    uint32_t world_chunk_size_bytes;
+
+    uint32_t checksum32;
+};
+
+struct ax_save_a1_world_v1 {
+    uint64_t tick;
+
+    /* content references */
+    uint32_t weapon_id_slot0;
+    uint32_t target_def_id;
+
+    /* player truth */
+    float px, py, pz;
+    float rx, ry, rz, rw;       /* quaternion */
+
+    /* weapon truth (A1) */
+    int32_t  ammo_in_mag;
+    int32_t  ammo_reserve;
+    uint32_t reload_ticks_remaining; /* 0 if not reloading */
+
+    /* target list */
+    uint32_t target_count;
+    uint32_t targets_offset_bytes;   /* absolute offset from start of blob */
+};
+
+struct ax_save_target_v1 {
+    uint32_t entity_id;
+
+    float px, py, pz;
+    float rx, ry, rz, rw;
+
+    int32_t  hp;
+    uint32_t flags;              /* bit0 = destroyed */
+};
+
+#pragma pack(pop)
+
+/*
+ * Simple additive checksum over save bytes.
+ * SAVE_FORMAT.md v0.3: compute over save_bytes[0..total-1]
+ * with the checksum32 field itself treated as zero.
+ */
+static uint32_t compute_save_checksum(const uint8_t* data, uint32_t size) {
+    uint32_t sum = 0;
+    /* offset of checksum32 within header */
+    const uint32_t cksum_offset = offsetof(ax_save_header_v1, checksum32);
+    for (uint32_t i = 0; i < size; ++i) {
+        if (i >= cksum_offset && i < cksum_offset + 4) continue; /* skip checksum field */
+        sum += data[i];
+    }
+    return sum;
+}
 
 ax_result ax_save_bytes(
     ax_core*  core,
@@ -726,19 +798,103 @@ ax_result ax_save_bytes(
         return AX_ERR_BAD_STATE;
     }
 
-    /*
-     * TODO: Implement SAVE_FORMAT.md v0.3
-     *   - write SaveHeaderV1 (magic, version, checksum)
-     *   - write A1WorldV1 (tick, player transform, weapon state)
-     *   - write TargetsV1[] (entity_id, transform, hp, flags)
-     *   - support size-query (out_buf == NULL)
-     *   - support buffer-too-small rule
-     */
-    (void)out_buf;
-    (void)out_cap_bytes;
-    *out_size_bytes = 0;
-    set_last_error("ax_save_bytes: not yet implemented");
-    return AX_ERR_UNSUPPORTED;
+    /* count targets */
+    uint32_t target_count = 0;
+    for (const auto& e : core->entities) {
+        if (e.state_flags & AX_ENT_FLAG_TARGET) {
+            target_count++;
+        }
+    }
+
+    /* compute total blob size */
+    uint32_t total = (uint32_t)sizeof(ax_save_header_v1)
+                   + (uint32_t)sizeof(ax_save_a1_world_v1)
+                   + target_count * (uint32_t)sizeof(ax_save_target_v1);
+
+    /* always write required size (buffer-too-small rule) */
+    *out_size_bytes = total;
+
+    /* size-query path */
+    if (!out_buf) {
+        return AX_OK;
+    }
+
+    /* buffer too small */
+    if (out_cap_bytes < total) {
+        set_last_error("ax_save_bytes: buffer too small (%u < %u)",
+                       out_cap_bytes, total);
+        return AX_ERR_BUFFER_TOO_SMALL;
+    }
+
+    uint8_t* dst = (uint8_t*)out_buf;
+
+    /* ── A1WorldV1 ────────────────────────────────────────────────── */
+
+    uint32_t world_offset = (uint32_t)sizeof(ax_save_header_v1);
+    uint32_t targets_offset = world_offset + (uint32_t)sizeof(ax_save_a1_world_v1);
+
+    ax_save_a1_world_v1 world = {};
+    world.tick = core->tick;
+
+    /* content references (hardcoded A1 values matching content loading) */
+    world.weapon_id_slot0  = 1000;
+    world.target_def_id    = 2000;
+
+    /* find player entity */
+    for (const auto& e : core->entities) {
+        if (e.state_flags & AX_ENT_FLAG_PLAYER) {
+            world.px = e.px;  world.py = e.py;  world.pz = e.pz;
+            world.rx = e.rx;  world.ry = e.ry;  world.rz = e.rz;  world.rw = e.rw;
+            break;
+        }
+    }
+
+    /* weapon state */
+    world.ammo_in_mag            = core->weapon.ammo_in_mag;
+    world.ammo_reserve           = core->weapon.ammo_reserve;
+    world.reload_ticks_remaining = core->weapon.reload_ticks_remaining;
+
+    world.target_count         = target_count;
+    world.targets_offset_bytes = targets_offset;
+
+    std::memcpy(dst + world_offset, &world, sizeof(world));
+
+    /* ── TargetsV1[] ──────────────────────────────────────────────── */
+
+    uint32_t t_offset = targets_offset;
+    for (const auto& e : core->entities) {
+        if (!(e.state_flags & AX_ENT_FLAG_TARGET)) continue;
+
+        ax_save_target_v1 tgt = {};
+        tgt.entity_id = e.id;
+        tgt.px = e.px;  tgt.py = e.py;  tgt.pz = e.pz;
+        tgt.rx = e.rx;  tgt.ry = e.ry;  tgt.rz = e.rz;  tgt.rw = e.rw;
+        tgt.hp = e.hp;
+        tgt.flags = (e.state_flags & AX_ENT_FLAG_DEAD) ? 1u : 0u;
+
+        std::memcpy(dst + t_offset, &tgt, sizeof(tgt));
+        t_offset += (uint32_t)sizeof(tgt);
+    }
+
+    /* ── SaveHeaderV1 (written last so checksum covers everything) ── */
+
+    ax_save_header_v1 hdr = {};
+    hdr.magic              = AX_SAVE_MAGIC;
+    hdr.version_major      = 1;
+    hdr.version_minor      = 0;
+    hdr.total_size_bytes   = total;
+    hdr.world_chunk_offset = world_offset;
+    hdr.world_chunk_size_bytes = (uint32_t)sizeof(ax_save_a1_world_v1);
+    hdr.checksum32         = 0;  /* zeroed for checksum computation */
+
+    std::memcpy(dst, &hdr, sizeof(hdr));
+
+    /* compute checksum over entire blob with checksum field as zero */
+    hdr.checksum32 = compute_save_checksum(dst, total);
+    std::memcpy(dst, &hdr, sizeof(hdr));
+
+    g_last_error[0] = '\0';
+    return AX_OK;
 }
 
 ax_result ax_load_save_bytes(
@@ -765,16 +921,139 @@ ax_result ax_load_save_bytes(
         return AX_ERR_BAD_STATE;
     }
 
+    const uint8_t* src = (const uint8_t*)save_buf;
+
+    /* ── Validate header ─────────────────────────────────────────── */
+
+    if (save_size_bytes < sizeof(ax_save_header_v1)) {
+        set_last_error("ax_load_save_bytes: buffer too small for header (%u < %u)",
+                       save_size_bytes, (unsigned)sizeof(ax_save_header_v1));
+        return AX_ERR_INVALID_ARG;
+    }
+
+    ax_save_header_v1 hdr;
+    std::memcpy(&hdr, src, sizeof(hdr));
+
+    if (hdr.magic != AX_SAVE_MAGIC) {
+        set_last_error("ax_load_save_bytes: bad magic (expected 0x%08X, got 0x%08X)",
+                       AX_SAVE_MAGIC, hdr.magic);
+        return AX_ERR_INVALID_ARG;
+    }
+
+    if (hdr.version_major != 1) {
+        set_last_error("ax_load_save_bytes: unsupported save version %u.%u",
+                       hdr.version_major, hdr.version_minor);
+        return AX_ERR_UNSUPPORTED;
+    }
+
+    if (hdr.total_size_bytes != save_size_bytes) {
+        set_last_error("ax_load_save_bytes: total_size_bytes mismatch (%u in header vs %u provided)",
+                       hdr.total_size_bytes, save_size_bytes);
+        return AX_ERR_INVALID_ARG;
+    }
+
+    /* verify checksum */
+    uint32_t expected_cksum = compute_save_checksum(src, save_size_bytes);
+    if (hdr.checksum32 != expected_cksum) {
+        set_last_error("ax_load_save_bytes: checksum mismatch (expected %u, got %u)",
+                       expected_cksum, hdr.checksum32);
+        return AX_ERR_INVALID_ARG;
+    }
+
+    /* ── Validate world chunk ────────────────────────────────────── */
+
+    if (hdr.world_chunk_offset + hdr.world_chunk_size_bytes > save_size_bytes) {
+        set_last_error("ax_load_save_bytes: world chunk extends past end of buffer");
+        return AX_ERR_INVALID_ARG;
+    }
+
+    if (hdr.world_chunk_size_bytes < sizeof(ax_save_a1_world_v1)) {
+        set_last_error("ax_load_save_bytes: world chunk too small");
+        return AX_ERR_INVALID_ARG;
+    }
+
+    ax_save_a1_world_v1 world;
+    std::memcpy(&world, src + hdr.world_chunk_offset, sizeof(world));
+
+    /* validate target array bounds */
+    uint32_t targets_end = world.targets_offset_bytes
+                         + world.target_count * (uint32_t)sizeof(ax_save_target_v1);
+    if (targets_end > save_size_bytes) {
+        set_last_error("ax_load_save_bytes: target array extends past end of buffer");
+        return AX_ERR_INVALID_ARG;
+    }
+
+    /* ── Read target data (validate before mutating state) ───────── */
+
+    std::vector<ax_save_target_v1> saved_targets(world.target_count);
+    if (world.target_count > 0) {
+        std::memcpy(saved_targets.data(),
+                    src + world.targets_offset_bytes,
+                    world.target_count * sizeof(ax_save_target_v1));
+    }
+
     /*
-     * TODO: Implement SAVE_FORMAT.md v0.3
-     *   - validate SaveHeaderV1 (magic 'AXSV', version, checksum)
-     *   - read A1WorldV1 (restore tick, player transform, weapon state)
-     *   - read TargetsV1[] (restore entity states)
-     *   - verify content references exist
-     *   - fail non-destructively (preserve current state on error)
+     * Verify all saved target entity_ids exist in current world.
+     * Non-destructive: if validation fails, we haven't touched core state.
      */
-    set_last_error("ax_load_save_bytes: not yet implemented");
-    return AX_ERR_UNSUPPORTED;
+    for (uint32_t i = 0; i < world.target_count; ++i) {
+        bool found = false;
+        for (const auto& e : core->entities) {
+            if (e.id == saved_targets[i].entity_id) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            set_last_error("ax_load_save_bytes: saved target entity_id %u not found in world",
+                           saved_targets[i].entity_id);
+            return AX_ERR_INVALID_ARG;
+        }
+    }
+
+    /* ── All validation passed — apply state (no more early returns) ── */
+
+    core->tick = world.tick;
+
+    /* restore player transform */
+    for (auto& e : core->entities) {
+        if (e.state_flags & AX_ENT_FLAG_PLAYER) {
+            e.px = world.px;  e.py = world.py;  e.pz = world.pz;
+            e.rx = world.rx;  e.ry = world.ry;  e.rz = world.rz;  e.rw = world.rw;
+            break;
+        }
+    }
+
+    /* restore weapon state */
+    core->weapon.ammo_in_mag            = world.ammo_in_mag;
+    core->weapon.ammo_reserve           = world.ammo_reserve;
+    core->weapon.reload_ticks_remaining = world.reload_ticks_remaining;
+    core->weapon.reloading              = (world.reload_ticks_remaining > 0);
+
+    /* restore target states */
+    for (uint32_t i = 0; i < world.target_count; ++i) {
+        const ax_save_target_v1& st = saved_targets[i];
+        for (auto& e : core->entities) {
+            if (e.id == st.entity_id) {
+                e.px = st.px;  e.py = st.py;  e.pz = st.pz;
+                e.rx = st.rx;  e.ry = st.ry;  e.rz = st.rz;  e.rw = st.rw;
+                e.hp = st.hp;
+                if (st.flags & 1u) {
+                    e.state_flags |= AX_ENT_FLAG_DEAD;
+                } else {
+                    e.state_flags &= ~AX_ENT_FLAG_DEAD;
+                }
+                break;
+            }
+        }
+    }
+
+    /* clear pending actions and events (fresh state after load) */
+    core->action_queue.clear();
+    core->events.clear();
+
+    g_last_error[0] = '\0';
+    return AX_OK;
 }
 
 /* ── Diagnostics ──────────────────────────────────────────────────── */

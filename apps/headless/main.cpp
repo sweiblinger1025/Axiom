@@ -168,6 +168,101 @@ static void submit_action(ax_core* core, const ax_action_v1& action) {
     }
 }
 
+static std::vector<uint8_t> take_save(ax_core* core) {
+    uint32_t size = 0;
+    ax_result r = ax_save_bytes(core, nullptr, 0, &size);
+    if (r != AX_OK || size == 0) {
+        printf("  take_save: size query failed: %s\n", result_str(r));
+        return {};
+    }
+
+    std::vector<uint8_t> buf(size);
+    r = ax_save_bytes(core, buf.data(), size, &size);
+    if (r != AX_OK) {
+        printf("  take_save: copy failed: %s\n", result_str(r));
+        return {};
+    }
+
+    return buf;
+}
+
+/* ── Snapshot comparison (logic-relevant A1 fields) ──────────────── */
+
+static int compare_snapshots_logic(const char* label,
+                                   const parsed_snapshot& a,
+                                   const parsed_snapshot& b) {
+    int mismatches = 0;
+
+    /* tick */
+    if (a.header->tick != b.header->tick) {
+        printf("  %s: tick mismatch: %llu vs %llu\n", label,
+               (unsigned long long)a.header->tick, (unsigned long long)b.header->tick);
+        mismatches++;
+    }
+
+    /* entity count */
+    if (a.header->entity_count != b.header->entity_count) {
+        printf("  %s: entity_count mismatch: %u vs %u\n", label,
+               a.header->entity_count, b.header->entity_count);
+        mismatches++;
+    }
+
+    uint32_t ent_count = a.header->entity_count < b.header->entity_count
+                       ? a.header->entity_count : b.header->entity_count;
+
+    for (uint32_t i = 0; i < ent_count; ++i) {
+        const auto& ea = a.entities[i];
+        const auto& eb = b.entities[i];
+
+        if (ea.id != eb.id) {
+            printf("  %s: entity[%u] id mismatch: %u vs %u\n", label, i, ea.id, eb.id);
+            mismatches++;
+        }
+        if (ea.hp != eb.hp) {
+            printf("  %s: entity[%u] hp mismatch: %d vs %d\n", label, i, ea.hp, eb.hp);
+            mismatches++;
+        }
+        if (ea.state_flags != eb.state_flags) {
+            printf("  %s: entity[%u] state_flags mismatch: 0x%x vs 0x%x\n", label, i,
+                   ea.state_flags, eb.state_flags);
+            mismatches++;
+        }
+        /* transforms (spatial-tier, but should round-trip identically within same process) */
+        if (ea.px != eb.px || ea.py != eb.py || ea.pz != eb.pz) {
+            printf("  %s: entity[%u] position mismatch\n", label, i);
+            mismatches++;
+        }
+        if (ea.rx != eb.rx || ea.ry != eb.ry || ea.rz != eb.rz || ea.rw != eb.rw) {
+            printf("  %s: entity[%u] rotation mismatch\n", label, i);
+            mismatches++;
+        }
+    }
+
+    /* weapon state */
+    if (a.weapon && b.weapon) {
+        if (a.weapon->ammo_in_mag != b.weapon->ammo_in_mag) {
+            printf("  %s: ammo_in_mag mismatch: %d vs %d\n", label,
+                   a.weapon->ammo_in_mag, b.weapon->ammo_in_mag);
+            mismatches++;
+        }
+        if (a.weapon->ammo_reserve != b.weapon->ammo_reserve) {
+            printf("  %s: ammo_reserve mismatch: %d vs %d\n", label,
+                   a.weapon->ammo_reserve, b.weapon->ammo_reserve);
+            mismatches++;
+        }
+        if (a.weapon->weapon_flags != b.weapon->weapon_flags) {
+            printf("  %s: weapon_flags mismatch: 0x%x vs 0x%x\n", label,
+                   a.weapon->weapon_flags, b.weapon->weapon_flags);
+            mismatches++;
+        }
+    } else if ((a.weapon != nullptr) != (b.weapon != nullptr)) {
+        printf("  %s: weapon presence mismatch\n", label);
+        mismatches++;
+    }
+
+    return mismatches;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  * Test: basic fire + damage
  * COMBAT_A1 acceptance criteria #1
@@ -707,6 +802,298 @@ static void test_deterministic_replay(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * Test: save/load continuity
+ * COMBAT_A1 acceptance criteria #3
+ *
+ * Invariant 1 — Snapshot equality at save tick:
+ *   snapshot immediately after load must match snapshot at moment of save.
+ *
+ * Invariant 2 — Continuation determinism:
+ *   save at T, load, continue same remaining actions → identical outcomes
+ *   to an uninterrupted run.
+ *
+ * Two save points:
+ *   T1 = tick 5  (baseline: after firing, one target destroyed, not reloading)
+ *   T2 = tick 16 (hard case: mid-reload, FIRE_BLOCKED has occurred)
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_save_load_continuity(void) {
+    printf("test_save_load_continuity\n");
+
+    /*
+     * Script: 50 ticks covering fire, reload, fire-while-reloading, post-reload fire.
+     *
+     * Ticks  1-12:  fire 12 shots (target 100 dies at tick 5)
+     * Tick   13:    fire on empty → FIRE_BLOCKED
+     * Tick   14:    reload starts
+     * Tick   15-16: fire during reload → FIRE_BLOCKED
+     * Ticks  17-43: idle (reload completes at tick 43: started tick 14,
+     *               timer set to 30 and decremented to 29 on that tick,
+     *               then 28 more decrements through ticks 15-42,
+     *               reaches 0 on tick 43 → RELOAD_DONE)
+     * Tick   44:    fire post-reload
+     * Tick   45:    fire
+     * Ticks  46-50: idle
+     */
+    struct scripted_action {
+        uint64_t tick;
+        uint32_t type;
+        float    f1, f2;
+        uint32_t weapon_slot;
+    };
+
+    const scripted_action script[] = {
+        {  1, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  2, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  3, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  4, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  5, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* target 100 dies (5x10=50 dmg) */
+        {  6, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  7, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  8, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        {  9, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        { 10, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        { 11, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },
+        { 12, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* mag empty */
+        { 13, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* FIRE_BLOCKED: empty_mag */
+        { 14, AX_ACT_RELOAD,       0.0f, 0.0f, 0 },   /* reload starts */
+        { 15, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* FIRE_BLOCKED: reloading */
+        { 16, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* FIRE_BLOCKED: reloading */
+        { 44, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* post-reload fire */
+        { 45, AX_ACT_FIRE_ONCE,    0.0f, 0.0f, 0 },   /* post-reload fire */
+    };
+    const uint32_t script_len = sizeof(script) / sizeof(script[0]);
+    const uint64_t total_ticks = 50;
+
+    /* ── Data collected from each run ─────────────────────────────── */
+
+    struct run_result {
+        std::vector<uint8_t> snapshot_at_T;
+        std::vector<uint8_t> final_snapshot;
+        int32_t total_damage;
+        int32_t destroy_count;
+        int32_t fire_blocked_count;
+        int32_t reload_done_count;
+    };
+
+    /* ── Test two save points ─────────────────────────────────────── */
+
+    const uint64_t save_points[] = { 5, 16 };
+    const char*    save_labels[] = { "T1=5 (not reloading)", "T2=16 (mid-reload)" };
+
+    for (int sp = 0; sp < 2; ++sp) {
+        const uint64_t save_tick = save_points[sp];
+        printf("  save point %s\n", save_labels[sp]);
+
+        /* ── Run A: uninterrupted full run ────────────────────────── */
+
+        run_result run_a = {};
+        {
+            ax_core* core = create_and_load("content/");
+            CHECK(core != nullptr, "%s run_a: core creation failed", save_labels[sp]);
+            if (!core) continue;
+
+            for (uint64_t t = 1; t <= total_ticks; ++t) {
+                for (uint32_t s = 0; s < script_len; ++s) {
+                    if (script[s].tick != t) continue;
+
+                    ax_action_v1 act = {};
+                    act.tick     = t;
+                    act.actor_id = 1;
+                    act.type     = script[s].type;
+
+                    switch (script[s].type) {
+                        case AX_ACT_FIRE_ONCE:
+                            act.u.fire_once.weapon_slot = script[s].weapon_slot;
+                            break;
+                        case AX_ACT_RELOAD:
+                            act.u.reload.weapon_slot = script[s].weapon_slot;
+                            break;
+                        default:
+                            break;
+                    }
+                    submit_action(core, act);
+                }
+
+                ax_step_ticks(core, 1);
+
+                /* collect events */
+                auto buf = take_snapshot(core);
+                parsed_snapshot snap = parse_snapshot(buf.data(), (uint32_t)buf.size());
+
+                for (uint32_t i = 0; i < snap.header->event_count; ++i) {
+                    const ax_snapshot_event_v1* evt = &snap.events[i];
+                    if (evt->type == AX_EVT_DAMAGE_DEALT)   run_a.total_damage += evt->value;
+                    if (evt->type == AX_EVT_TARGET_DESTROY)  run_a.destroy_count++;
+                    if (evt->type == AX_EVT_FIRE_BLOCKED)    run_a.fire_blocked_count++;
+                    if (evt->type == AX_EVT_RELOAD_DONE)     run_a.reload_done_count++;
+                }
+
+                /* capture snapshot at save tick */
+                if (t == save_tick) {
+                    run_a.snapshot_at_T = buf;
+                }
+            }
+
+            run_a.final_snapshot = take_snapshot(core);
+
+            ax_unload_content(core);
+            ax_destroy(core);
+        }
+
+        /* ── Run B: save at T, destroy, new core, load, continue ──── */
+
+        run_result run_b = {};
+        {
+            /* Phase 1: run up to save tick, save */
+            ax_core* core = create_and_load("content/");
+            CHECK(core != nullptr, "%s run_b: core creation failed", save_labels[sp]);
+            if (!core) continue;
+
+            for (uint64_t t = 1; t <= save_tick; ++t) {
+                for (uint32_t s = 0; s < script_len; ++s) {
+                    if (script[s].tick != t) continue;
+
+                    ax_action_v1 act = {};
+                    act.tick     = t;
+                    act.actor_id = 1;
+                    act.type     = script[s].type;
+
+                    switch (script[s].type) {
+                        case AX_ACT_FIRE_ONCE:
+                            act.u.fire_once.weapon_slot = script[s].weapon_slot;
+                            break;
+                        case AX_ACT_RELOAD:
+                            act.u.reload.weapon_slot = script[s].weapon_slot;
+                            break;
+                        default:
+                            break;
+                    }
+                    submit_action(core, act);
+                }
+
+                ax_step_ticks(core, 1);
+
+                /* accumulate events for ticks 1..save_tick */
+                auto buf = take_snapshot(core);
+                parsed_snapshot snap = parse_snapshot(buf.data(), (uint32_t)buf.size());
+
+                for (uint32_t i = 0; i < snap.header->event_count; ++i) {
+                    const ax_snapshot_event_v1* evt = &snap.events[i];
+                    if (evt->type == AX_EVT_DAMAGE_DEALT)   run_b.total_damage += evt->value;
+                    if (evt->type == AX_EVT_TARGET_DESTROY)  run_b.destroy_count++;
+                    if (evt->type == AX_EVT_FIRE_BLOCKED)    run_b.fire_blocked_count++;
+                    if (evt->type == AX_EVT_RELOAD_DONE)     run_b.reload_done_count++;
+                }
+            }
+
+            /* save */
+            auto save_data = take_save(core);
+            CHECK(!save_data.empty(), "%s: save failed", save_labels[sp]);
+
+            /* capture snapshot at save tick (before destroying) */
+            run_b.snapshot_at_T = take_snapshot(core);
+
+            ax_unload_content(core);
+            ax_destroy(core);
+
+            /* Phase 2: new core, load content, load save, continue */
+            core = create_and_load("content/");
+            CHECK(core != nullptr, "%s run_b phase2: core creation failed", save_labels[sp]);
+            if (!core) continue;
+
+            ax_result lr = ax_load_save_bytes(core, save_data.data(), (uint32_t)save_data.size());
+            CHECK_OK(lr);
+
+            /* ── Invariant 1: snapshot equality at save tick ────────── */
+            {
+                auto post_load_buf = take_snapshot(core);
+                parsed_snapshot post_load = parse_snapshot(post_load_buf.data(),
+                                                          (uint32_t)post_load_buf.size());
+                parsed_snapshot at_save = parse_snapshot(run_a.snapshot_at_T.data(),
+                                                        (uint32_t)run_a.snapshot_at_T.size());
+
+                int mismatches = compare_snapshots_logic(save_labels[sp], at_save, post_load);
+                CHECK(mismatches == 0, "%s: snapshot at save tick has %d mismatches",
+                      save_labels[sp], mismatches);
+            }
+
+            /* Phase 3: continue remaining actions */
+            for (uint64_t t = save_tick + 1; t <= total_ticks; ++t) {
+                for (uint32_t s = 0; s < script_len; ++s) {
+                    if (script[s].tick != t) continue;
+
+                    ax_action_v1 act = {};
+                    act.tick     = t;
+                    act.actor_id = 1;
+                    act.type     = script[s].type;
+
+                    switch (script[s].type) {
+                        case AX_ACT_FIRE_ONCE:
+                            act.u.fire_once.weapon_slot = script[s].weapon_slot;
+                            break;
+                        case AX_ACT_RELOAD:
+                            act.u.reload.weapon_slot = script[s].weapon_slot;
+                            break;
+                        default:
+                            break;
+                    }
+                    submit_action(core, act);
+                }
+
+                ax_step_ticks(core, 1);
+
+                /* accumulate events for remaining ticks */
+                auto buf = take_snapshot(core);
+                parsed_snapshot snap = parse_snapshot(buf.data(), (uint32_t)buf.size());
+
+                for (uint32_t i = 0; i < snap.header->event_count; ++i) {
+                    const ax_snapshot_event_v1* evt = &snap.events[i];
+                    if (evt->type == AX_EVT_DAMAGE_DEALT)   run_b.total_damage += evt->value;
+                    if (evt->type == AX_EVT_TARGET_DESTROY)  run_b.destroy_count++;
+                    if (evt->type == AX_EVT_FIRE_BLOCKED)    run_b.fire_blocked_count++;
+                    if (evt->type == AX_EVT_RELOAD_DONE)     run_b.reload_done_count++;
+                }
+            }
+
+            run_b.final_snapshot = take_snapshot(core);
+
+            ax_unload_content(core);
+            ax_destroy(core);
+        }
+
+        /* ── Invariant 2: continuation determinism ────────────────── */
+
+        CHECK(run_a.total_damage == run_b.total_damage,
+              "%s: total_damage mismatch: A=%d B=%d",
+              save_labels[sp], run_a.total_damage, run_b.total_damage);
+        CHECK(run_a.destroy_count == run_b.destroy_count,
+              "%s: destroy_count mismatch: A=%d B=%d",
+              save_labels[sp], run_a.destroy_count, run_b.destroy_count);
+        CHECK(run_a.fire_blocked_count == run_b.fire_blocked_count,
+              "%s: fire_blocked_count mismatch: A=%d B=%d",
+              save_labels[sp], run_a.fire_blocked_count, run_b.fire_blocked_count);
+        CHECK(run_a.reload_done_count == run_b.reload_done_count,
+              "%s: reload_done_count mismatch: A=%d B=%d",
+              save_labels[sp], run_a.reload_done_count, run_b.reload_done_count);
+
+        /* final snapshot logic comparison */
+        {
+            parsed_snapshot sa = parse_snapshot(run_a.final_snapshot.data(),
+                                               (uint32_t)run_a.final_snapshot.size());
+            parsed_snapshot sb = parse_snapshot(run_b.final_snapshot.data(),
+                                               (uint32_t)run_b.final_snapshot.size());
+
+            int mismatches = compare_snapshots_logic(save_labels[sp], sa, sb);
+            CHECK(mismatches == 0, "%s: final snapshot has %d mismatches",
+                  save_labels[sp], mismatches);
+        }
+    }
+
+    printf("  done\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * Test: error paths
  * Validates structural validation, lifecycle enforcement, and
  * buffer-too-small behavior across the ABI surface.
@@ -1080,6 +1467,7 @@ int main(void) {
     test_basic_fire_and_damage();
     test_reload_cycle();
     test_deterministic_replay();
+    test_save_load_continuity();
     test_error_paths();
 
     printf("\n=== Results: %d passed, %d failed, %d total ===\n",

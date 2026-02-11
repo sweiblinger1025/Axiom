@@ -9,9 +9,35 @@
 
 ## Milestone Index (rolling)
 - **Milestone 0 (Docs-First Restart):** ✅ All 8 docs locked
-- **Milestone A1 (Shooting Range):** 🟨 In progress — ABI + core + 153 tests passing, save/load continuity test remaining
+- **Milestone A1 (Shooting Range):** ✅ All 3 acceptance criteria met — 175 tests passing
 - **Milestone A2 (Combat Arena AI):** ⬜ Not started
 - **Milestone B (RPG Slice):** ⬜ Not started
+
+---
+
+## 2026-02-11 — Save/Load Implementation + A1 Acceptance Complete [A1]
+
+### Completed
+- Implemented `ax_save_bytes` and `ax_load_save_bytes` per SAVE_FORMAT.md v0.3
+  - Internal packed structs: `ax_save_header_v1`, `ax_save_a1_world_v1`, `ax_save_target_v1`
+  - Save: size-query path, buffer-too-small rule, additive checksum
+  - Load: full validation (magic, version, size, checksum, chunk bounds, entity IDs) before mutating state
+  - Non-destructive load failure (core state preserved on error)
+  - `reloading` derived from `reload_ticks_remaining > 0` on load (SAVE_FORMAT.md note)
+- Added `test_save_load_continuity` to headless test harness (22 new assertions)
+  - Two save points: T1=tick 5 (not reloading), T2=tick 16 (mid-reload)
+  - Invariant 1: snapshot equality at save tick (transforms, HP, ammo, reload state)
+  - Invariant 2: continuation determinism (event sums, final snapshot match uninterrupted run)
+- Added helpers: `take_save()`, `compare_snapshots_logic()`
+- COMBAT_A1 acceptance criteria status:
+  - ✅ #1 Headless run (scripted sequence, assert logical outcomes)
+  - ✅ #2 Deterministic replay (identical state + actions → identical results)
+  - ✅ #3 Save/load continuity (snapshot equality + continuation determinism)
+- Verified: 175/175 tests pass on MSVC (CLion)
+
+### Files
+- `engine/src/ax_core.cpp` (save/load implementation)
+- `apps/headless/main.cpp` (continuity test + helpers)
 
 ---
 

@@ -9,9 +9,68 @@
 
 ## Milestone Index (rolling)
 - **Milestone 0 (Docs-First Restart):** ✅ All 8 docs locked
-- **Milestone A1 (Shooting Range):** 🟨 In progress — repo skeleton committed, ABI header next
+- **Milestone A1 (Shooting Range):** 🟨 In progress — ABI + core + 153 tests passing, save/load continuity test remaining
 - **Milestone A2 (Combat Arena AI):** ⬜ Not started
 - **Milestone B (RPG Slice):** ⬜ Not started
+
+---
+
+## 2026-02-10 — CMake Build System + MSVC Fix [BUILD][INFRA]
+
+### Completed
+- Created three-level CMake structure: root → engine/ → apps/headless/
+- `axiom_core` builds as static library, `axiom_headless` links against it
+- C++20 standard, extensions OFF (MSVC portability)
+- Strict warnings on both GCC/Clang (-Wall -Wextra -Wpedantic) and MSVC (/W4)
+- Fixed MSVC C2124 error: replaced `0.0f / 0.0f` with `NAN` macro in error path test
+- Added `<cmath>` include for NAN
+- Verified: 153/153 tests pass on both GCC 13.3.0 and MSVC (CLion + command line)
+
+### Files
+- `CMakeLists.txt` (root)
+- `engine/CMakeLists.txt`
+- `apps/headless/CMakeLists.txt`
+- `apps/headless/main.cpp` (NAN fix only)
+
+---
+
+## 2026-02-10 — ABI Rebuild + Core Implementation + Headless Tests [ABI][A1]
+
+### Completed
+- Rebuilt `ax_abi.h` from scratch to match WORLD_INTERFACE.md v0.4 exactly
+  - All 9 known divergences resolved (see 2026-02-08 Known Issues)
+  - C11 enums, consistent 4-parameter buffer patterns, complete action structures
+  - Added `AX_EVT_FIRE_BLOCKED` (COMBAT_A1 additive event)
+- Implemented `ax_core.cpp` with full A1 gameplay logic
+  - Lifecycle: create/destroy, content load/unload
+  - Content system: weapon + target definitions with validation
+  - World setup: player + target entity spawning
+  - Movement: MOVE_INTENT with player-local transform, ground plane clamp
+  - Look: LOOK_INTENT with delta yaw/pitch, pitch clamping
+  - Fire: hitscan ray–sphere intersection, closest-hit selection, flat damage
+  - Reload: tick-based countdown per COMBAT_A1 spec
+  - Events: DAMAGE_DEALT, TARGET_DESTROY, RELOAD_STARTED, RELOAD_DONE, FIRE_BLOCKED
+  - Snapshots: copy-out blob with header, entities, weapon state, events
+  - Save/load: binary format matching SAVE_FORMAT.md v0.3 with checksum
+  - Error handling: last-error strings, buffer-too-small pattern
+  - Action validation: two-phase (structural at submit, state-dependent at tick)
+- Built comprehensive headless test suite (153 tests)
+  - `test_basic_fire_and_damage`: lifecycle, content, fire, damage, target destruction
+  - `test_reload_cycle`: reload mechanics, tick countdown, ammo transfer, edge cases
+  - `test_deterministic_replay`: identical action sequences → identical outcomes
+  - `test_error_paths`: null params, bad versions, buffer too small, NaN rejection
+- COMBAT_A1 acceptance criteria status:
+  - ✅ #1 Headless run (scripted sequence, assert logical outcomes)
+  - ✅ #2 Deterministic replay (identical state + actions → identical results)
+  - 🟨 #3 Save/load continuity (functions exist, dedicated test not yet written)
+
+### Files
+- `engine/include/ax_abi.h` (complete ABI header)
+- `engine/src/ax_core.cpp` (complete A1 core implementation)
+- `apps/headless/main.cpp` (153-test harness)
+
+### Known Issues (carry forward)
+- Save/load continuity test (COMBAT_A1 acceptance #3) not yet implemented
 
 ---
 
@@ -82,21 +141,5 @@ tools/
 docs/               # locked markdown docs
 ```
 
-### Known Issues (carry forward)
-ABI header (`ax_abi.h`) has 9 divergences from WORLD_INTERFACE.md v0.4:
-1. C++ typed enums (`: uint16_t`) — must be plain C11 enums
-2. `ax_action_v1` missing `tick` + `actor_id` fields
-3. `ax_action_batch_v1` has extra `stride` field + `void*` instead of typed pointer
-4. Function named `ax_submit_actions_next_tick` — should be `ax_submit_actions`
-5. `ax_snapshot_event_v1` missing `value` field (has 3 fields, spec has 4)
-6. `ax_snapshot_entity_v1` uses `kind` instead of `archetype_id` + `state_flags`
-7. `ax_create_params_v1` missing `abi_major` / `abi_minor` fields
-8. Entity creation hardcoded in `ax_create` (should be post-content-load)
-9. Empty `ax_last_error.cpp` included in build
-
-### Next
-- Fix `ax_abi.h` section-by-section to match WORLD_INTERFACE (new session)
-- Update `ax_core.cpp` to match corrected header
-- Update `apps/headless/main.cpp` to exercise corrected ABI
-- Split CMakeLists.txt into root + `apps/headless/CMakeLists.txt`
-- Begin A1 implementation: content loading → entity spawning → tick stepping → hitscan
+### Known Issues (resolved)
+ABI header (`ax_abi.h`) had 9 divergences from WORLD_INTERFACE.md v0.4 — all resolved in 2026-02-10 session.
